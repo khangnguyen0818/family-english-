@@ -3305,7 +3305,7 @@ async function playLines(items,onLine,rate){
   catch(e){return (e.code==="interrupted"||e.code==="canceled")?"stopped":"fail"}
   finally{if(my===playToken){browserSpeaking=false;updStop();onLine&&onLine(null)}}
 }
-function stopAll(){playToken++;if(tts&&ttsState!=="idle")tts.stop().catch(()=>{});if(synth)synth.cancel();browserSpeaking=false;updStop();document.querySelectorAll(".line.playing").forEach(e=>e.classList.remove("playing"))}
+function stopAll(){playToken++;if(tts&&ttsState!=="idle")tts.stop().catch(()=>{});if(synth&&(synth.speaking||synth.pending))synth.cancel();browserSpeaking=false;updStop();document.querySelectorAll(".line.playing").forEach(e=>e.classList.remove("playing"))}
 
 /* ============ SPEECH IN ============ */
 let dict=null, capsDone=false, curRec=null, dictLang="en";
@@ -3318,7 +3318,7 @@ function record(target,ui){
   const arm=ms=>{clear();rec.timers.push(setTimeout(()=>{if((rec.text+rec.part).trim())rec.stop()},ms));rec.timers.push(setTimeout(()=>rec.stop(),16000))};
   const finish=(reason,code)=>{if(rec.done)return;rec.done=true;clear();if(curRec===rec)curRec=null;ui.onState("idle");
     const heard=(rec.text+" "+rec.part).trim();
-    if(heard)ui.onDone(heard);else ui.onError(errMsg(reason,code))};
+    if(heard)ui.onDone(heard);else ui.onError(errMsg(IOS_APP&&reason==="sr_other"?"ios_app":reason,code))};
   rec.finish=finish;
   if(dict){
     rec.partial=t=>{rec.part=t;ui.onLive((rec.text+" "+t).trim());arm(2600)};
@@ -3336,25 +3336,33 @@ function record(target,ui){
      Only the browser's own speech recognition touches the microphone (no recorder, no extra permission
      request), so the browser asks once and remembers the answer for this site. */
   const MAP={"not-allowed":"not_granted","service-not-allowed":"not_granted","no-speech":"nospeech","network":"network","audio-capture":"audio_capture","language-not-supported":"sr_lang"};
-  let r,code="",quiet=null,got=false;
-  try{r=new SR()}catch(e){ui.onError(errMsg("nosr"));return}
-  r.lang="en-US";r.interimResults=true;r.maxAlternatives=1;r.continuous=false;
-  r.onresult=ev=>{got=true;let f="",p="";for(let k=0;k<ev.results.length;k++){const x=ev.results[k];if(x.isFinal)f+=x[0].transcript+" ";else p+=x[0].transcript}
-    rec.text=f;rec.part=p;ui.onLive((f+p).trim());
-    /* stop shortly after the last word, in case the phone keeps listening */
-    clearTimeout(quiet);quiet=setTimeout(()=>{try{r.stop()}catch(e){}},f.trim()?600:1500)};
-  r.onerror=ev=>{code=ev.error||""};
-  r.onend=()=>{clearTimeout(quiet);finish(MAP[code]||(got?"nospeech":code?"sr_other":"nospeech"),code&&!MAP[code]?code:"")};
-  rec.stop=()=>{clearTimeout(quiet);try{r.stop()}catch(e){}rec.timers.push(setTimeout(()=>finish("nospeech"),1500))};
-  curRec=rec;
-  try{r.start()}catch(e){finish("sr_other",e&&e.name||"start")}
-  ui.onState("listening");rec.timers.push(setTimeout(()=>rec.stop(),10000));
+  let r=null,code="",quiet=null,got=false,tries=0,userStop=false;
+  /* iPhone Safari often cuts recognition off ("aborted") right after the page has spoken a line or on the
+     first start. It is retried silently: 2nd try after a short pause, 3rd try in continuous mode. */
+  const go=()=>{
+    tries++;code="";const t0=Date.now();
+    try{r=new SR()}catch(e){finish("nosr");return}
+    r.lang="en-US";r.interimResults=true;r.maxAlternatives=1;r.continuous=tries>=3;
+    r.onresult=ev=>{got=true;let f="",p="";for(let k=0;k<ev.results.length;k++){const x=ev.results[k];if(x.isFinal)f+=x[0].transcript+" ";else p+=x[0].transcript}
+      rec.text=f;rec.part=p;ui.onLive((f+p).trim());
+      /* stop shortly after the last word (iPhone keeps listening and rarely marks words as final) */
+      clearTimeout(quiet);quiet=setTimeout(()=>{userStop=true;try{r.stop()}catch(e){}},f.trim()?700:1300)};
+    r.onerror=ev=>{code=ev.error||""};
+    r.onend=()=>{clearTimeout(quiet);if(rec.done)return;
+      if(!got&&!userStop&&(code==="aborted"||code===""||code==="audio-capture")&&Date.now()-t0<3000&&tries<3){setTimeout(()=>{if(!rec.done)go()},tries*400);return}
+      finish(MAP[code]||(got?"nospeech":code?"sr_other":"nospeech"),code&&!MAP[code]?code:"")};
+    try{r.start()}catch(e){if(tries<3)setTimeout(()=>{if(!rec.done)go()},400);else finish("sr_other",e&&e.name||"start")}
+  };
+  rec.stop=()=>{userStop=true;clearTimeout(quiet);try{r&&r.stop()}catch(e){}rec.timers.push(setTimeout(()=>finish("nospeech"),1500))};
+  curRec=rec;ui.onState("listening");rec.timers.push(setTimeout(()=>rec.stop(),12000));
+  go();
 }
 function errMsg(r,code){const m=({
  not_granted:"Chưa được phép dùng micro. Trong Chrome bấm biểu tượng bên trái thanh địa chỉ → Quyền → Micrô → Cho phép, rồi tải lại trang.",
  audio_capture:"Không mở được micro. Có thể ứng dụng khác (Zalo, ghi âm, cuộc gọi…) đang dùng micro. Tắt ứng dụng đó rồi thử lại.",
  sr_lang:"Trình duyệt chưa hỗ trợ nhận dạng tiếng Anh. Hãy mở link bằng Google Chrome.",
- sr_other:"Chưa nghe được. Bấm mic lần nữa rồi nói. Nếu lần nào cũng vậy, hãy mở link bằng Google Chrome.",
+ sr_other:/iPhone|iPad/.test(navigator.userAgent)?"Chưa nghe được. Bấm mic lần nữa rồi nói. Nếu lần nào cũng vậy: vào Cài đặt → Siri (hoặc Siri & Tìm kiếm) và bật Siri, rồi Cài đặt → Cài đặt chung → Bàn phím → bật Đọc chính tả; sau đó mở lại trang.":"Chưa nghe được. Bấm mic lần nữa rồi nói. Nếu lần nào cũng vậy, hãy mở link bằng Google Chrome.",
+ ios_app:"Trên iPhone, mở từ biểu tượng ngoài màn hình chính thì không chấm điểm được. Hãy mở link bằng Safari.",
  dismissed:"Bạn đã đóng hộp hỏi quyền. Bấm nút mic lần nữa để cho phép.",
  retry_lang:"Bấm nút mic lần nữa để thử lại.",
  unavailable:"Thu âm chưa khả dụng với tài khoản hoặc cửa sổ này.",
@@ -3365,6 +3373,8 @@ function errMsg(r,code){const m=({
 }[r]||"Chưa nghe thấy gì. Bấm mic, nói to và rõ rồi đợi một giây.");return code?m+` (mã lỗi: ${code} · ${browserName()})`:m}
 function browserName(){const u=navigator.userAgent;const os=/iPhone|iPad/.test(u)?"iPhone":/Android/.test(u)?"Android":"máy tính";
   const b=/zalo/i.test(u)?"Zalo":/FBAN|FBAV|FB_IAB/.test(u)?"Facebook":/CocCoc|coc_coc/i.test(u)?"Cốc Cốc":/SamsungBrowser/.test(u)?"Samsung Internet":/EdgA|Edg\//.test(u)?"Edge":/CriOS|Chrome\//.test(u)?"Chrome":/Safari/.test(u)?"Safari":"trình duyệt khác";return b+" "+os}
+/* opened from an iPhone home-screen icon: Safari gives no speech recognition there */
+const IOS_APP=/iPhone|iPad/.test(navigator.userAgent)&&(navigator.standalone===true||(window.matchMedia&&matchMedia("(display-mode: standalone)").matches));
 const INAPP=/zalo|FBAN|FBAV|FB_IAB|Instagram|Line\/|TikTok|musical_ly/i.test(navigator.userAgent);
 const ODDBROWSER=/coc_coc|CocCoc|SamsungBrowser|UCBrowser|MiuiBrowser|OPR\//i.test(navigator.userAgent);
 
