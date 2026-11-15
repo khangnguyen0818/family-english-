@@ -149,6 +149,9 @@ select{font:inherit;font-size:.85rem;padding:4px 8px;border-radius:8px;border:1p
 .micperm{flex-basis:100%;background:var(--sun-soft);border:1px solid var(--sun);border-radius:14px;padding:12px 14px;display:grid;gap:8px;justify-items:start}
 .micperm p{margin:0;font-size:.92rem}
 .micperm .hint{color:var(--muted);font-size:.85rem}
+.iosapp{display:grid;gap:8px;justify-items:start;margin-top:8px}
+.iosapp p{margin:0;font-size:.88rem;color:var(--muted)}
+.iosapp a.btn{text-decoration:none}
 .modes{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .modes .role{--c:var(--accent);text-align:center}
 .names{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -3432,6 +3435,12 @@ function updNote(){const el=$("#micnote");if(!el)return;
 
 /* ============ RENDER ============ */
 const app=$("#app");
+/* iPhone home-screen web app: Safari blocks speech recognition there. Offer to reopen the same page in Safari
+   (x-safari-https:// opens a link in Safari from a web app, iOS 17+). */
+function safariBtn(){const u=location.href.replace(/^https?:\/\//,"x-safari-https://");
+  return `<div class="iosapp"><a class="btn primary" href="${esc(u)}">Mở bằng Safari để chấm điểm</a>
+  <p>Muốn biểu tượng ngoài màn hình chính chấm điểm được: xóa biểu tượng cũ, mở link bằng Safari → nút Chia sẻ → <b>Thêm vào MH chính</b> → <b>tắt ‘Mở dưới dạng ứng dụng web’</b> → Thêm.</p></div>`}
+if(IOS_APP)app.insertAdjacentHTML("beforebegin",`<div class="wrap" style="padding-top:10px"><div class="err" style="margin:0 0 6px">Bạn đang mở từ biểu tượng ngoài màn hình chính. Ở chế độ này iPhone không cho chấm điểm phát âm.</div>${safariBtn()}</div>`);
 let cur=null, tab="talk", rp=null, rpTok=0;
 function pct(t){const n=t.L.filter((_,i)=>(best[t.id+":"+i]||0)>=75).length;return Math.round(100*n/t.L.length)}
 function renderHome(){
@@ -3557,7 +3566,7 @@ function micUI(btn,text,resEl,key,onScore){
     onState:s=>{const on=s==="starting"||s==="listening"||s==="finishing";btn.classList.toggle("on",on);if(lbl)lbl.textContent=s==="starting"?"Đang mở mic…":s==="listening"?"Đang nghe… bấm để dừng":s==="finishing"?"Đang xử lý…":orig},
     onLive:x=>{resEl.hidden=false;resEl.innerHTML=`<div class="live">Đang nghe: <i>${esc(x)||"…"}</i></div>`},
     onDone:(h,url)=>{resEl.hidden=false;if(h){const r=score(text,h);resEl.innerHTML=resultHTML(r,url);if(key)saveBest(key,r.score);onScore&&onScore(r.score)}else{resEl.innerHTML=resultHTML(null,url);onScore&&onScore(null)}},
-    onError:m=>{resEl.hidden=false;resEl.innerHTML=`<div class="err">${esc(m)}</div>`}
+    onError:m=>{resEl.hidden=false;resEl.innerHTML=`<div class="err">${esc(m)}</div>${IOS_APP?safariBtn():""}`}
   }
 }
 
