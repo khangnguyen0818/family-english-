@@ -3431,7 +3431,7 @@ function updNote(){const el=$("#micnote");if(!el)return;
   const micOk=!!(dict||SR);const spkOk=!!(tts||synth);
   const micTxt=micOk?"bấm mic, nói xong tự dừng và chấm điểm":(capsDone?"không hỗ trợ ở đây":"đang kiểm tra…");
   const warn=!window.claude&&(INAPP||ODDBROWSER||!SR)?`<span class="pill no" style="white-space:normal"><span class="dot"></span>${INAPP?"Bạn đang mở trong Zalo/Facebook. Bấm ⋮ hoặc ‘Mở bằng trình duyệt’ để mở bằng Chrome thì mới chấm điểm được.":"Để chấm điểm phát âm, hãy mở link này bằng Google Chrome."}</span>`:"";
-  el.innerHTML=`<span class="pill ${spkOk?"ok":"no"}"><span class="dot"></span>Loa: ${spkOk?(tts?"giọng Claude":"giọng trình duyệt"):"không hỗ trợ"}</span><span class="pill ${micOk?"ok":"no"}"><span class="dot"></span>Thu âm: ${micTxt}</span>${warn}`}
+  el.innerHTML=`<span class="pill ${spkOk?"ok":"no"}"><span class="dot"></span>Loa: ${spkOk?(tts?"giọng Claude":"giọng trình duyệt"):"không hỗ trợ"}</span><span class="pill ${micOk?"ok":"no"}"><span class="dot"></span>Thu âm: ${micTxt}</span>${warn}${window.claude?"":`<a class="pill" href="#mictest">Kiểm tra micro →</a>`}`}
 
 /* ============ RENDER ============ */
 const app=$("#app");
@@ -3566,7 +3566,7 @@ function micUI(btn,text,resEl,key,onScore){
     onState:s=>{const on=s==="starting"||s==="listening"||s==="finishing";btn.classList.toggle("on",on);if(lbl)lbl.textContent=s==="starting"?"Đang mở mic…":s==="listening"?"Đang nghe… bấm để dừng":s==="finishing"?"Đang xử lý…":orig},
     onLive:x=>{resEl.hidden=false;resEl.innerHTML=`<div class="live">Đang nghe: <i>${esc(x)||"…"}</i></div>`},
     onDone:(h,url)=>{resEl.hidden=false;if(h){const r=score(text,h);resEl.innerHTML=resultHTML(r,url);if(key)saveBest(key,r.score);onScore&&onScore(r.score)}else{resEl.innerHTML=resultHTML(null,url);onScore&&onScore(null)}},
-    onError:m=>{resEl.hidden=false;resEl.innerHTML=`<div class="err">${esc(m)}</div>${IOS_APP?safariBtn():""}`}
+    onError:m=>{resEl.hidden=false;resEl.innerHTML=`<div class="err">${esc(m)}</div>${IOS_APP?safariBtn():""}<p style="margin:8px 0 0"><a href="#mictest">Kiểm tra micro →</a></p>`}
   }
 }
 
@@ -3574,6 +3574,7 @@ function micUI(btn,text,resEl,key,onScore){
 document.addEventListener("click",e=>{
   const b=e.target.closest("[data-act]");if(!b)return;const a=b.dataset.act,t=cur;
   if(a==="stop"){stopAll();return}
+  if(a==="mt"){micTest(b.dataset.v);return}
   if(a==="say"||a==="slow"){const i=+b.dataset.i,ln=t.L[i];const card=$("#l"+i);
     document.querySelectorAll(".line.playing").forEach(x=>x.classList.remove("playing"));if(card)card.classList.add("playing");
     playLines([{text:ln[1],spk:ln[0],id:"l"+i}],null,a==="slow"?0.7:RATE).then(()=>{if(card)card.classList.remove("playing")});return}
@@ -3604,9 +3605,39 @@ document.addEventListener("change",e=>{
   if(e.target.id==="rate"){RATE=+e.target.value;store.set("cn_rate",RATE);if(tts&&tts.setRate)tts.setRate(RATE).catch(()=>{})}
   if(e.target.id==="showvi"){SHOWVI=e.target.checked;store.set("cn_vi",SHOWVI);$("#tb").classList.toggle("hide-vi",!SHOWVI)}
 });
+/* ---- Mic test page (#mictest): logs every step of speech recognition so a screenshot shows what the phone does ---- */
+let mtRec=null;
+function renderMicTest(){
+  cur={mictest:true};rp=null;rpTok++;
+  const u=navigator.userAgent;
+  app.innerHTML=`<div class="wrap" style="padding-block:16px;display:grid;gap:12px">
+  <a href="#" class="back">← Chủ đề</a><h1 style="font-size:1.6rem">Kiểm tra micro</h1>
+  <p>Bấm lần lượt từng nút A, B, C, D. Với mỗi nút, nói câu <b>“Good morning”</b> rồi đợi. Sau đó chụp màn hình toàn bộ trang này gửi lại.</p>
+  <pre id="mtinfo" style="white-space:pre-wrap;font-size:.8rem;background:var(--surface2);padding:10px;border-radius:10px;margin:0">Trình duyệt: ${esc(browserName())}
+Mở từ màn hình chính: ${IOS_APP?"CÓ":"không"} · Có nhận dạng giọng nói: ${SR?"có":"KHÔNG"} · Có ghi âm: ${navigator.mediaDevices&&navigator.mediaDevices.getUserMedia?"có":"không"}
+${esc(u)}</pre>
+  <div class="acts" style="flex-wrap:wrap"><button class="btn primary" data-act="mt" data-v="A">A · Cách hiện tại</button><button class="btn" data-act="mt" data-v="B">B · Nghe liên tục</button><button class="btn" data-act="mt" data-v="C">C · Không đặt ngôn ngữ</button><button class="btn" data-act="mt" data-v="D">D · Chỉ thử micro</button></div>
+  <pre id="mtlog" style="white-space:pre-wrap;font-size:.85rem;background:var(--surface);border:1px solid var(--line);padding:10px;border-radius:10px;min-height:160px;margin:0"></pre></div>`;
+  window.scrollTo(0,0);
+}
+function micTest(v){
+  const log=$("#mtlog"),t0=Date.now(),w=s=>{log.textContent+=`[${v} ${((Date.now()-t0)/1000).toFixed(1)}s] ${s}\n`};
+  if(mtRec){try{mtRec.abort()}catch(e){}mtRec=null}
+  if(v==="D"){w("xin micro…");navigator.mediaDevices.getUserMedia({audio:true}).then(s=>{w("micro MỞ ĐƯỢC ✔");setTimeout(()=>{s.getTracks().forEach(t=>t.stop());w("đã tắt micro")},2000)}).catch(e=>w("micro LỖI: "+(e&&e.name)+" "+(e&&e.message)));return}
+  if(!SR){w("không có nhận dạng giọng nói");return}
+  let r;try{r=new SR()}catch(e){w("tạo lỗi: "+e.name);return}mtRec=r;
+  if(v!=="C")r.lang="en-US";r.interimResults=v==="A";r.continuous=v==="B";r.maxAlternatives=1;
+  ["start","audiostart","soundstart","speechstart","speechend","soundend","audioend","nomatch"].forEach(n=>r.addEventListener(n,()=>w(n)));
+  r.onresult=ev=>{let s="";for(let k=0;k<ev.results.length;k++)s+=(ev.results[k].isFinal?"[final] ":"[tạm] ")+ev.results[k][0].transcript+" ";w("result: "+s)};
+  r.onerror=ev=>w("ERROR: "+ev.error+(ev.message?" – "+ev.message:""));
+  r.onend=()=>{w("end");if(mtRec===r)mtRec=null};
+  try{r.start();w("đã gọi start()")}catch(e){w("start lỗi: "+e.name+" "+e.message)}
+  setTimeout(()=>{if(mtRec===r){w("tự dừng sau 8s");try{r.stop()}catch(e){}}},8000);
+}
 function route(){
   stopAll();if(curRec)curRec.stop();
   const h=decodeURIComponent(location.hash.slice(1));
+  if(h==="mictest"){renderMicTest();return}
   const t=T.find(x=>x.id===h);
   if(t){renderTopic(t);return}
   if(cur||!app.firstChild)renderHome();
