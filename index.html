@@ -3334,13 +3334,13 @@ function record(target,ui){
   if(curRec){curRec.stop();return}
   stopAll();
   /* no speech recognition here (some phone browsers): record for replay instead of scoring */
-  if(!dict&&!SR&&CAN_REC&&!window.claude){recordLocal(ui);return}
+  if(!dict&&(!SR||srBroken)&&CAN_REC&&!window.claude){recordLocal(ui);return}
   const rec={text:"",part:"",done:false,timers:[]};
   const clear=()=>{rec.timers.forEach(clearTimeout);rec.timers=[]};
   const arm=ms=>{clear();rec.timers.push(setTimeout(()=>{if((rec.text+rec.part).trim())rec.stop()},ms));rec.timers.push(setTimeout(()=>rec.stop(),16000))};
   const finish=reason=>{if(rec.done)return;rec.done=true;clear();if(curRec===rec)curRec=null;ui.onState("idle");
     const heard=(rec.text+" "+rec.part).trim();
-    if(heard)ui.onDone(heard);else ui.onError(errMsg(reason))};
+    if(heard)ui.onDone(heard);else ui.onError(errMsg(reason,rec.code))};
   rec.finish=finish;
   if(dict){
     rec.partial=t=>{rec.part=t;ui.onLive((rec.text+" "+t).trim());arm(2600)};
@@ -3354,23 +3354,41 @@ function record(target,ui){
     return;
   }
   if(SR){
-    let r;try{r=new SR()}catch(e){ui.onError(errMsg("nosr"));return}
-    /* continuous=false: the browser ends by itself when the person stops talking (needed on Android, where continuous mode never ends) */
-    r.lang="en-US";r.interimResults=true;r.maxAlternatives=1;r.continuous=false;
-    let idle=null;const nudge=ms=>{clearTimeout(idle);idle=setTimeout(()=>rec.stop(),ms)};
-    r.onresult=ev=>{let f="",p="";for(let k=0;k<ev.results.length;k++){const res=ev.results[k];if(res.isFinal)f+=res[0].transcript+" ";else p+=res[0].transcript}
-      rec.text=f;rec.part=p;ui.onLive((f+p).trim());nudge(f.trim()?700:2000)};
-    r.onerror=ev=>{rec.err=ev.error==="not-allowed"||ev.error==="service-not-allowed"?"not_granted":ev.error==="no-speech"||ev.error==="aborted"?"nospeech":ev.error==="network"?"network":"upstream_error"};
-    r.onend=()=>{clearTimeout(idle);finish(rec.err||"nospeech")};
-    rec.stop=()=>{clearTimeout(idle);try{r.stop()}catch(e){}rec.timers.push(setTimeout(()=>finish(rec.err||"nospeech"),1200))};
-    curRec=rec;
-    try{r.start();ui.onState("listening");rec.timers.push(setTimeout(()=>rec.stop(),12000))}catch(e){finish("nosr")}
+    /* Phone browsers sometimes end recognition the instant it starts (first use after the permission prompt,
+       or a browser whose recognition service is missing). Retry once; if it still ends at once, fall back to
+       recording for replay and say why scoring is unavailable. */
+    const MAP={"not-allowed":"not_granted","service-not-allowed":"sr_service","no-speech":"nospeech","aborted":"aborted","network":"network","audio-capture":"audio_capture","language-not-supported":"sr_lang","bad-grammar":"sr_other"};
+    curRec=rec;let r=null,idle=null,tries=0;
+    const nudge=ms=>{clearTimeout(idle);idle=setTimeout(()=>rec.stop(),ms)};
+    rec.stop=()=>{rec.userStop=true;clearTimeout(idle);try{r&&r.stop()}catch(e){}rec.timers.push(setTimeout(()=>finish(rec.err||"nospeech"),1200))};
+    const go=()=>{
+      tries++;rec.err=null;rec.code="";const t0=Date.now();let got=false;
+      try{r=new SR()}catch(e){finish("nosr");return}
+      /* continuous=false: the browser ends by itself when the person stops talking (needed on Android) */
+      r.lang="en-US";r.interimResults=true;r.maxAlternatives=1;r.continuous=false;
+      r.onresult=ev=>{got=true;let f="",p="";for(let k=0;k<ev.results.length;k++){const res=ev.results[k];if(res.isFinal)f+=res[0].transcript+" ";else p+=res[0].transcript}
+        rec.text=f;rec.part=p;ui.onLive((f+p).trim());nudge(f.trim()?700:2000)};
+      r.onerror=ev=>{rec.code=ev.error||"";rec.err=MAP[ev.error]||"sr_other"};
+      r.onend=()=>{clearTimeout(idle);if(rec.done)return;
+        const fast=Date.now()-t0<1500&&!got&&!rec.userStop&&rec.err!=="not_granted";
+        if(fast&&tries<2){setTimeout(()=>{if(!rec.done)go()},250);return}
+        if(fast&&CAN_REC&&!window.claude){rec.done=true;clear();if(curRec===rec)curRec=null;ui.onState("idle");
+          srBroken=rec.code||"end";updNote();setTimeout(()=>recordLocal(ui),50);return}
+        finish(rec.err||"nospeech")};
+      try{r.start()}catch(e){finish("nosr")}
+    };
+    ui.onState("listening");go();rec.timers.push(setTimeout(()=>rec.stop(),12000));
     return;
   }
   ui.onError(errMsg("nosr"));
 }
-function errMsg(r){return({
- not_granted:"Chưa được phép dùng micro. Hãy cho phép trong menu Quyền (Permissions) của trang hoặc của trình duyệt.",
+function errMsg(r,code){const m=({
+ not_granted:"Chưa được phép dùng micro. Trong Chrome bấm biểu tượng ổ khóa hoặc ⓘ cạnh địa chỉ trang → Quyền → Micrô → Cho phép, rồi tải lại trang.",
+ sr_service:"Trình duyệt này không cho dùng nhận dạng giọng nói để chấm điểm. Hãy mở link bằng Google Chrome.",
+ aborted:"Micro bị ngắt giữa chừng. Bấm mic lần nữa để thử lại.",
+ audio_capture:"Không mở được micro. Có thể ứng dụng khác (Zalo, ghi âm, cuộc gọi…) đang dùng micro. Tắt ứng dụng đó rồi thử lại.",
+ sr_lang:"Trình duyệt chưa hỗ trợ nhận dạng tiếng Anh. Hãy mở link bằng Google Chrome.",
+ sr_other:"Chấm điểm gặp lỗi. Hãy mở link bằng Google Chrome rồi thử lại.",
  dismissed:"Bạn đã đóng hộp hỏi quyền. Bấm nút mic lần nữa để cho phép.",
  retry_lang:"Bấm nút mic lần nữa để thử lại.",
  unavailable:"Thu âm chưa khả dụng với tài khoản hoặc cửa sổ này.",
@@ -3378,7 +3396,10 @@ function errMsg(r){return({
  nospeech:"Chưa nghe thấy gì. Bấm mic, nói to và rõ rồi đợi một giây.",
  network:"Chấm điểm cần mạng Internet. Kiểm tra kết nối rồi thử lại.",
  nosr:"Nơi bạn đang mở không hỗ trợ thu âm. Hãy mở trang này trên claude.ai bằng Chrome hoặc Edge, hoặc cửa sổ chính của ứng dụng Claude."
-}[r]||"Chưa nghe thấy gì. Bấm mic, nói to và rõ rồi đợi một giây.")}
+}[r]||"Chưa nghe thấy gì. Bấm mic, nói to và rõ rồi đợi một giây.");return code?m+` (mã lỗi: ${code})`:m}
+let srBroken=null;
+const INAPP=/zalo|FBAN|FBAV|FB_IAB|Instagram|Line\/|TikTok|musical_ly/i.test(navigator.userAgent);
+const ODDBROWSER=/coc_coc|CocCoc|SamsungBrowser|UCBrowser|MiuiBrowser|OPR\//i.test(navigator.userAgent);
 
 /* ============ SCORING ============ */
 const ONES=["zero","one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve","thirteen","fourteen","fifteen","sixteen","seventeen","eighteen","nineteen"],TENS=["","","twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety"];
@@ -3410,7 +3431,7 @@ function score(target,heard){
 function resultHTML(r,url){
   const au=url?`<div class="replay"><span class="lbl">Giọng của bạn</span><audio controls src="${url}"></audio></div>`
     :(CAN_REC&&!window.claude?`<div class="replay"><button class="btn" data-act="selfrec">${IC.mic}<span class="mlbl">Ghi âm để nghe lại giọng mình</span></button><div class="selfout"></div></div>`:"");
-  if(!r)return `<div class="body"><p class="fb">Đã thu âm xong. Bấm nghe lại giọng của mình rồi so với giọng mẫu.</p>${au}</div>`;
+  if(!r)return `<div class="body"><p class="fb">Đã thu âm xong. Bấm nghe lại giọng của mình rồi so với giọng mẫu.</p>${srBroken||!SR?`<p class="heard">Trình duyệt này chưa chấm điểm được${srBroken&&srBroken!=="end"?` (mã lỗi: ${esc(srBroken)})`:""}, nên chỉ ghi âm để nghe lại. Muốn có điểm, hãy mở link bằng Google Chrome.</p>`:""}${au}</div>`;
   const band=r.score>=85?"good":r.score>=60?"mid":"low";
   const fb=r.score>=90?"Xuất sắc! Máy nghe rõ từng từ.":r.score>=75?"Tốt lắm! Chú ý thêm các từ màu đỏ.":r.score>=50?"Khá rồi. Nghe mẫu thêm một lần rồi nói lại nhé.":"Máy chưa nghe rõ. Nói chậm hơn, rõ từng từ, nhất là âm cuối.";
   return `<div class="score s-${band}"><strong>${r.score}</strong><span>/ 100</span></div><div class="body"><p class="fb">${fb}</p><p class="words">${r.html}</p><p class="heard">Máy nghe được: “${esc(r.heard)}”</p>${au}</div>`;
@@ -3430,8 +3451,9 @@ function initCaps(n){
 function updNote(){const el=$("#micnote");if(!el)return;
   const local=!window.claude&&!!(navigator.mediaDevices&&window.MediaRecorder);
   const micOk=!!(dict||SR||local);const spkOk=!!(tts||synth);
-  const micTxt=local?(SR?"ghi âm, nghe lại và chấm điểm":"ghi âm và nghe lại"):micOk?"chấm điểm sẵn sàng":(capsDone?"không hỗ trợ ở đây":"đang kiểm tra…");
-  el.innerHTML=`<span class="pill ${spkOk?"ok":"no"}"><span class="dot"></span>Loa: ${spkOk?(tts?"giọng Claude":"giọng trình duyệt"):"không hỗ trợ"}</span><span class="pill ${micOk?"ok":"no"}"><span class="dot"></span>Thu âm: ${micTxt}</span>`}
+  const micTxt=local?(SR&&!srBroken?"chấm điểm và nghe lại":"chỉ ghi âm, nghe lại (chưa chấm điểm)"):micOk?"chấm điểm sẵn sàng":(capsDone?"không hỗ trợ ở đây":"đang kiểm tra…");
+  const warn=!window.claude&&(INAPP||ODDBROWSER||srBroken||!SR)?`<span class="pill no" style="white-space:normal"><span class="dot"></span>${INAPP?"Bạn đang mở trong Zalo/Facebook. Bấm ⋮ hoặc ‘Mở bằng trình duyệt’ để mở bằng Chrome thì mới chấm điểm được.":"Để chấm điểm phát âm, hãy mở link này bằng Google Chrome."}</span>`:"";
+  el.innerHTML=`<span class="pill ${spkOk?"ok":"no"}"><span class="dot"></span>Loa: ${spkOk?(tts?"giọng Claude":"giọng trình duyệt"):"không hỗ trợ"}</span><span class="pill ${micOk&&!srBroken?"ok":"no"}"><span class="dot"></span>Thu âm: ${micTxt}</span>${warn}`}
 
 /* ============ RENDER ============ */
 const app=$("#app");
