@@ -3321,7 +3321,7 @@ function record(target,ui){
   const arm=ms=>{clear();rec.timers.push(setTimeout(()=>{if((rec.text+rec.part).trim())rec.stop()},ms));rec.timers.push(setTimeout(()=>rec.stop(),16000))};
   const finish=(reason,code)=>{if(rec.done)return;rec.done=true;clear();if(curRec===rec)curRec=null;ui.onState("idle");
     const heard=(rec.text+" "+rec.part).trim();
-    if(heard)ui.onDone(heard);else ui.onError(errMsg(IOS_APP&&reason==="sr_other"?"ios_app":reason,code))};
+    if(heard)ui.onDone(heard);else ui.onError(errMsg(reason,code))};
   rec.finish=finish;
   if(dict){
     rec.partial=t=>{rec.part=t;ui.onLive((rec.text+" "+t).trim());arm(2600)};
@@ -3334,38 +3334,82 @@ function record(target,ui){
       const c=e&&e.code; if(c==="unavailable"&&dictLang){dictLang=null;finish("retry_lang");return} finish(c)});
     return;
   }
-  if(!SR){ui.onError(errMsg("nosr"));return}
-  /* Phone and browser: tap the mic, speak, it stops by itself when you stop talking, then the score shows.
-     Only the browser's own speech recognition touches the microphone (no recorder, no extra permission
-     request), so the browser asks once and remembers the answer for this site. */
-  const MAP={"not-allowed":"not_granted","service-not-allowed":"not_granted","no-speech":"nospeech","network":"network","audio-capture":"audio_capture","language-not-supported":"sr_lang"};
-  let r=null,code="",quiet=null,got=false,tries=0,userStop=false;
-  /* iPhone Safari often cuts recognition off ("aborted") right after the page has spoken a line or on the
-     first start. It is retried silently: 2nd try after a short pause, 3rd try in continuous mode. */
-  const go=()=>{
-    tries++;code="";const t0=Date.now();
-    try{r=new SR()}catch(e){finish("nosr");return}
-    r.lang="en-US";r.interimResults=true;r.maxAlternatives=1;r.continuous=tries>=3;
-    r.onresult=ev=>{got=true;let f="",p="";for(let k=0;k<ev.results.length;k++){const x=ev.results[k];if(x.isFinal)f+=x[0].transcript+" ";else p+=x[0].transcript}
-      rec.text=f;rec.part=p;ui.onLive((f+p).trim());
-      /* stop shortly after the last word (iPhone keeps listening and rarely marks words as final) */
-      clearTimeout(quiet);quiet=setTimeout(()=>{userStop=true;try{r.stop()}catch(e){}},f.trim()?700:1300)};
-    r.onerror=ev=>{code=ev.error||""};
-    r.onend=()=>{clearTimeout(quiet);if(rec.done)return;
-      if(!got&&!userStop&&(code==="aborted"||code===""||code==="audio-capture")&&Date.now()-t0<3000&&tries<3){setTimeout(()=>{if(!rec.done)go()},tries*400);return}
-      finish(MAP[code]||(got?"nospeech":code?"sr_other":"nospeech"),code&&!MAP[code]?code:"")};
-    try{r.start()}catch(e){if(tries<3)setTimeout(()=>{if(!rec.done)go()},400);else finish("sr_other",e&&e.name||"start")}
-  };
-  rec.stop=()=>{userStop=true;clearTimeout(quiet);try{r&&r.stop()}catch(e){}rec.timers.push(setTimeout(()=>finish("nospeech"),1500))};
-  curRec=rec;ui.onState("listening");rec.timers.push(setTimeout(()=>rec.stop(),12000));
-  go();
+  if(!CAN_MIC){ui.onError(errMsg("nosr"));return}
+  recordWhisper(ui);
+}
+
+/* ===== Phone / browser mic (rebuilt from scratch) =====
+   Tap mic → record from the microphone → stops by itself 1.2 s after you stop talking → a small English
+   speech model (Whisper tiny) turns the recording into text inside the browser → score.
+   It does not use Siri, Dictation or Google's speech service, so it works the same on iPhone and Android.
+   The model (about 40 MB) downloads once on the first tap and is then kept by the browser. */
+const CAN_MIC=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia);
+const ASR_LIB="https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2";
+let asrP=null, asrReady=false, asrProg=null, actx=null;
+function loadASR(){
+  if(asrP)return asrP;
+  const files={};
+  asrP=import(ASR_LIB).then(TF=>{TF.env.allowLocalModels=false;
+    return TF.pipeline("automatic-speech-recognition","Xenova/whisper-tiny.en",{dtype:"q8",device:"wasm",
+      progress_callback:p=>{if(p&&p.status==="progress"&&p.total){files[p.file]=[p.loaded,p.total];let a=0,b=0;for(const k in files){a+=files[k][0];b+=files[k][1]}asrProg&&asrProg(Math.round(100*a/b))}}})})
+    .then(asr=>{asrReady=true;updNote();return asr});
+  asrP.catch(()=>{asrP=null});
+  return asrP;
+}
+function toMono16k(chunks,rate){
+  let n=0;for(const c of chunks)n+=c.length;const all=new Float32Array(n);let o=0;for(const c of chunks){all.set(c,o);o+=c.length}
+  if(rate===16000)return all;
+  const ratio=rate/16000,len=Math.floor(all.length/ratio),out=new Float32Array(len);
+  for(let i=0;i<len;i++){const x=i*ratio,j=Math.floor(x),f=x-j;out[i]=all[j]*(1-f)+(all[j+1]||0)*f}
+  return out;
+}
+function wavURL(pcm,rate){
+  const b=new ArrayBuffer(44+pcm.length*2),v=new DataView(b),s=(o,t)=>{for(let i=0;i<t.length;i++)v.setUint8(o+i,t.charCodeAt(i))};
+  s(0,"RIFF");v.setUint32(4,36+pcm.length*2,true);s(8,"WAVE");s(12,"fmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+  v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);s(36,"data");v.setUint32(40,pcm.length*2,true);
+  for(let i=0;i<pcm.length;i++){const x=Math.max(-1,Math.min(1,pcm[i]));v.setInt16(44+i*2,x<0?x*0x8000:x*0x7fff,true)}
+  return URL.createObjectURL(new Blob([b],{type:"audio/wav"}));
+}
+async function transcribe(pcm16k,info){
+  asrProg=p=>info(`Đang tải bộ chấm điểm (chỉ lần đầu)… ${p}%`);
+  try{if(!asrReady)info("Đang tải bộ chấm điểm (chỉ lần đầu, khoảng 40 MB)…");
+    const asr=await loadASR();info("Đang chấm điểm…");
+    const out=await asr(pcm16k);return ((out&&out.text)||"").replace(/\[[^\]]*\]|\([^)]*\)/g," ").trim()}
+  finally{asrProg=null}
+}
+function recordWhisper(ui){
+  const info=ui.onInfo||ui.onLive;
+  const rec={ended:false};curRec=rec;
+  /* the audio engine must be started inside the tap itself (iPhone rule) */
+  const AC=window.AudioContext||window.webkitAudioContext;
+  try{if(!actx)actx=new AC();if(actx.state!=="running")actx.resume()}catch(e){}
+  ui.onState("starting");loadASR();
+  const chunks=[];let spoke=false,quietMs=0,totalMs=0,stream=null,src=null,proc=null;
+  const cleanup=()=>{try{proc&&(proc.onaudioprocess=null,proc.disconnect());src&&src.disconnect()}catch(e){}if(stream)stream.getTracks().forEach(t=>t.stop())};
+  const end=async reason=>{if(rec.ended)return;rec.ended=true;cleanup();
+    if(!spoke){if(curRec===rec)curRec=null;ui.onState("idle");ui.onError(errMsg(reason||"nospeech"));return}
+    ui.onState("finishing");
+    const pcm=toMono16k(chunks,actx.sampleRate),url=wavURL(pcm,16000);
+    try{const text=await transcribe(pcm,info);if(curRec===rec)curRec=null;ui.onState("idle");
+      if(text)ui.onDone(text,url);else ui.onError(errMsg("nospeech"))}
+    catch(e){if(curRec===rec)curRec=null;ui.onState("idle");ui.onError(errMsg("asr_load"))}};
+  rec.stop=()=>end(spoke?"":"nospeech");
+  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}}).then(s=>{
+    if(rec.ended){s.getTracks().forEach(t=>t.stop());return}
+    stream=s;try{if(actx.state!=="running")actx.resume()}catch(e){}
+    src=actx.createMediaStreamSource(s);proc=actx.createScriptProcessor(4096,1,1);
+    proc.onaudioprocess=e=>{if(rec.ended)return;const d=e.inputBuffer.getChannelData(0);chunks.push(new Float32Array(d));
+      let sum=0;for(let i=0;i<d.length;i++)sum+=d[i]*d[i];const rms=Math.sqrt(sum/d.length),ms=1000*d.length/actx.sampleRate;totalMs+=ms;
+      if(rms>0.015){spoke=true;quietMs=0}else if(spoke)quietMs+=ms;
+      if(spoke&&quietMs>1200)end();else if(!spoke&&totalMs>7000)end("nospeech");else if(totalMs>12000)end()};
+    src.connect(proc);proc.connect(actx.destination);
+    ui.onState("listening");info("Đang nghe… nói xong sẽ tự dừng");
+  }).catch(e=>{rec.ended=true;if(curRec===rec)curRec=null;ui.onState("idle");ui.onError(errMsg(e&&e.name==="NotAllowedError"?"not_granted":"audio_capture"))});
 }
 function errMsg(r,code){const m=({
- not_granted:"Chưa được phép dùng micro. Trong Chrome bấm biểu tượng bên trái thanh địa chỉ → Quyền → Micrô → Cho phép, rồi tải lại trang.",
+ not_granted:/iPhone|iPad/.test(navigator.userAgent)?"Chưa được phép dùng micro. Vào Cài đặt → Safari → Micrô → chọn Cho phép, rồi tải lại trang.":"Chưa được phép dùng micro. Bấm biểu tượng bên trái thanh địa chỉ → Quyền → Micrô → Cho phép, rồi tải lại trang.",
  audio_capture:"Không mở được micro. Có thể ứng dụng khác (Zalo, ghi âm, cuộc gọi…) đang dùng micro. Tắt ứng dụng đó rồi thử lại.",
- sr_lang:"Trình duyệt chưa hỗ trợ nhận dạng tiếng Anh. Hãy mở link bằng Google Chrome.",
- sr_other:/iPhone|iPad/.test(navigator.userAgent)?"Chưa nghe được. Bấm mic lần nữa rồi nói. Nếu lần nào cũng vậy: vào Cài đặt → Siri (hoặc Siri & Tìm kiếm) và bật Siri, rồi Cài đặt → Cài đặt chung → Bàn phím → bật Đọc chính tả; sau đó mở lại trang.":"Chưa nghe được. Bấm mic lần nữa rồi nói. Nếu lần nào cũng vậy, hãy mở link bằng Google Chrome.",
- ios_app:"Trên iPhone, mở từ biểu tượng ngoài màn hình chính thì không chấm điểm được. Hãy mở link bằng Safari.",
+ asr_load:"Chưa tải được bộ chấm điểm. Lần đầu cần mạng Internet (khoảng 40 MB). Kiểm tra mạng rồi bấm mic lại.",
  dismissed:"Bạn đã đóng hộp hỏi quyền. Bấm nút mic lần nữa để cho phép.",
  retry_lang:"Bấm nút mic lần nữa để thử lại.",
  unavailable:"Thu âm chưa khả dụng với tài khoản hoặc cửa sổ này.",
@@ -3376,8 +3420,6 @@ function errMsg(r,code){const m=({
 }[r]||"Chưa nghe thấy gì. Bấm mic, nói to và rõ rồi đợi một giây.");return code?m+` (mã lỗi: ${code} · ${browserName()})`:m}
 function browserName(){const u=navigator.userAgent;const os=/iPhone|iPad/.test(u)?"iPhone":/Android/.test(u)?"Android":"máy tính";
   const b=/zalo/i.test(u)?"Zalo":/FBAN|FBAV|FB_IAB/.test(u)?"Facebook":/CocCoc|coc_coc/i.test(u)?"Cốc Cốc":/SamsungBrowser/.test(u)?"Samsung Internet":/EdgA|Edg\//.test(u)?"Edge":/CriOS|Chrome\//.test(u)?"Chrome":/Safari/.test(u)?"Safari":"trình duyệt khác";return b+" "+os}
-/* opened from an iPhone home-screen icon: Safari gives no speech recognition there */
-const IOS_APP=/iPhone|iPad/.test(navigator.userAgent)&&(navigator.standalone===true||(window.matchMedia&&matchMedia("(display-mode: standalone)").matches));
 const INAPP=/zalo|FBAN|FBAV|FB_IAB|Instagram|Line\/|TikTok|musical_ly/i.test(navigator.userAgent);
 const ODDBROWSER=/coc_coc|CocCoc|SamsungBrowser|UCBrowser|MiuiBrowser|OPR\//i.test(navigator.userAgent);
 
@@ -3428,19 +3470,14 @@ function initCaps(n){
   } else if(n<25) setTimeout(()=>initCaps(n+1),200); else {capsDone=true;updNote()}
 }
 function updNote(){const el=$("#micnote");if(!el)return;
-  const micOk=!!(dict||SR);const spkOk=!!(tts||synth);
+  const micOk=!!(dict||CAN_MIC);const spkOk=!!(tts||synth);
   const micTxt=micOk?"bấm mic, nói xong tự dừng và chấm điểm":(capsDone?"không hỗ trợ ở đây":"đang kiểm tra…");
-  const warn=!window.claude&&(INAPP||ODDBROWSER||!SR)?`<span class="pill no" style="white-space:normal"><span class="dot"></span>${INAPP?"Bạn đang mở trong Zalo/Facebook. Bấm ⋮ hoặc ‘Mở bằng trình duyệt’ để mở bằng Chrome thì mới chấm điểm được.":"Để chấm điểm phát âm, hãy mở link này bằng Google Chrome."}</span>`:"";
-  el.innerHTML=`<span class="pill ${spkOk?"ok":"no"}"><span class="dot"></span>Loa: ${spkOk?(tts?"giọng Claude":"giọng trình duyệt"):"không hỗ trợ"}</span><span class="pill ${micOk?"ok":"no"}"><span class="dot"></span>Thu âm: ${micTxt}</span>${warn}${window.claude?"":`<a class="pill" href="#mictest">Kiểm tra micro →</a>`}`}
+  const warn=!window.claude&&INAPP?`<span class="pill no" style="white-space:normal"><span class="dot"></span>Bạn đang mở trong Zalo/Facebook. Bấm ⋮ hoặc ‘Mở bằng trình duyệt’ để mở bằng Safari/Chrome thì micro mới chạy.</span>`:"";
+  const model=!dict&&CAN_MIC?`<span class="pill ${asrReady?"ok":""}"><span class="dot"></span>Bộ chấm điểm: ${asrReady?"đã sẵn sàng":"tải ở lần bấm mic đầu tiên (~40 MB)"}</span>`:"";
+  el.innerHTML=`<span class="pill ${spkOk?"ok":"no"}"><span class="dot"></span>Loa: ${spkOk?(tts?"giọng Claude":"giọng trình duyệt"):"không hỗ trợ"}</span><span class="pill ${micOk?"ok":"no"}"><span class="dot"></span>Thu âm: ${micTxt}</span>${model}${warn}`}
 
 /* ============ RENDER ============ */
 const app=$("#app");
-/* iPhone home-screen web app: Safari blocks speech recognition there. Offer to reopen the same page in Safari
-   (x-safari-https:// opens a link in Safari from a web app, iOS 17+). */
-function safariBtn(){const u=location.href.replace(/^https?:\/\//,"x-safari-https://");
-  return `<div class="iosapp"><a class="btn primary" href="${esc(u)}">Mở bằng Safari để chấm điểm</a>
-  <p>Muốn biểu tượng ngoài màn hình chính chấm điểm được: xóa biểu tượng cũ, mở link bằng Safari → nút Chia sẻ → <b>Thêm vào MH chính</b> → <b>tắt ‘Mở dưới dạng ứng dụng web’</b> → Thêm.</p></div>`}
-if(IOS_APP)app.insertAdjacentHTML("beforebegin",`<div class="wrap" style="padding-top:10px"><div class="err" style="margin:0 0 6px">Bạn đang mở từ biểu tượng ngoài màn hình chính. Ở chế độ này iPhone không cho chấm điểm phát âm.</div>${safariBtn()}</div>`);
 let cur=null, tab="talk", rp=null, rpTok=0;
 function pct(t){const n=t.L.filter((_,i)=>(best[t.id+":"+i]||0)>=75).length;return Math.round(100*n/t.L.length)}
 function renderHome(){
@@ -3565,8 +3602,9 @@ function micUI(btn,text,resEl,key,onScore){
   return{
     onState:s=>{const on=s==="starting"||s==="listening"||s==="finishing";btn.classList.toggle("on",on);if(lbl)lbl.textContent=s==="starting"?"Đang mở mic…":s==="listening"?"Đang nghe… bấm để dừng":s==="finishing"?"Đang xử lý…":orig},
     onLive:x=>{resEl.hidden=false;resEl.innerHTML=`<div class="live">Đang nghe: <i>${esc(x)||"…"}</i></div>`},
+    onInfo:x=>{resEl.hidden=false;resEl.innerHTML=`<div class="live">${esc(x)}</div>`},
     onDone:(h,url)=>{resEl.hidden=false;if(h){const r=score(text,h);resEl.innerHTML=resultHTML(r,url);if(key)saveBest(key,r.score);onScore&&onScore(r.score)}else{resEl.innerHTML=resultHTML(null,url);onScore&&onScore(null)}},
-    onError:m=>{resEl.hidden=false;resEl.innerHTML=`<div class="err">${esc(m)}</div>${IOS_APP?safariBtn():""}<p style="margin:8px 0 0"><a href="#mictest">Kiểm tra micro →</a></p>`}
+    onError:m=>{resEl.hidden=false;resEl.innerHTML=`<div class="err">${esc(m)}</div>`}
   }
 }
 
@@ -3574,7 +3612,6 @@ function micUI(btn,text,resEl,key,onScore){
 document.addEventListener("click",e=>{
   const b=e.target.closest("[data-act]");if(!b)return;const a=b.dataset.act,t=cur;
   if(a==="stop"){stopAll();return}
-  if(a==="mt"){micTest(b.dataset.v);return}
   if(a==="say"||a==="slow"){const i=+b.dataset.i,ln=t.L[i];const card=$("#l"+i);
     document.querySelectorAll(".line.playing").forEach(x=>x.classList.remove("playing"));if(card)card.classList.add("playing");
     playLines([{text:ln[1],spk:ln[0],id:"l"+i}],null,a==="slow"?0.7:RATE).then(()=>{if(card)card.classList.remove("playing")});return}
@@ -3605,39 +3642,9 @@ document.addEventListener("change",e=>{
   if(e.target.id==="rate"){RATE=+e.target.value;store.set("cn_rate",RATE);if(tts&&tts.setRate)tts.setRate(RATE).catch(()=>{})}
   if(e.target.id==="showvi"){SHOWVI=e.target.checked;store.set("cn_vi",SHOWVI);$("#tb").classList.toggle("hide-vi",!SHOWVI)}
 });
-/* ---- Mic test page (#mictest): logs every step of speech recognition so a screenshot shows what the phone does ---- */
-let mtRec=null;
-function renderMicTest(){
-  cur={mictest:true};rp=null;rpTok++;
-  const u=navigator.userAgent;
-  app.innerHTML=`<div class="wrap" style="padding-block:16px;display:grid;gap:12px">
-  <a href="#" class="back">← Chủ đề</a><h1 style="font-size:1.6rem">Kiểm tra micro</h1>
-  <p>Bấm lần lượt từng nút A, B, C, D. Với mỗi nút, nói câu <b>“Good morning”</b> rồi đợi. Sau đó chụp màn hình toàn bộ trang này gửi lại.</p>
-  <pre id="mtinfo" style="white-space:pre-wrap;font-size:.8rem;background:var(--surface2);padding:10px;border-radius:10px;margin:0">Trình duyệt: ${esc(browserName())}
-Mở từ màn hình chính: ${IOS_APP?"CÓ":"không"} · Có nhận dạng giọng nói: ${SR?"có":"KHÔNG"} · Có ghi âm: ${navigator.mediaDevices&&navigator.mediaDevices.getUserMedia?"có":"không"}
-${esc(u)}</pre>
-  <div class="acts" style="flex-wrap:wrap"><button class="btn primary" data-act="mt" data-v="A">A · Cách hiện tại</button><button class="btn" data-act="mt" data-v="B">B · Nghe liên tục</button><button class="btn" data-act="mt" data-v="C">C · Không đặt ngôn ngữ</button><button class="btn" data-act="mt" data-v="D">D · Chỉ thử micro</button></div>
-  <pre id="mtlog" style="white-space:pre-wrap;font-size:.85rem;background:var(--surface);border:1px solid var(--line);padding:10px;border-radius:10px;min-height:160px;margin:0"></pre></div>`;
-  window.scrollTo(0,0);
-}
-function micTest(v){
-  const log=$("#mtlog"),t0=Date.now(),w=s=>{log.textContent+=`[${v} ${((Date.now()-t0)/1000).toFixed(1)}s] ${s}\n`};
-  if(mtRec){try{mtRec.abort()}catch(e){}mtRec=null}
-  if(v==="D"){w("xin micro…");navigator.mediaDevices.getUserMedia({audio:true}).then(s=>{w("micro MỞ ĐƯỢC ✔");setTimeout(()=>{s.getTracks().forEach(t=>t.stop());w("đã tắt micro")},2000)}).catch(e=>w("micro LỖI: "+(e&&e.name)+" "+(e&&e.message)));return}
-  if(!SR){w("không có nhận dạng giọng nói");return}
-  let r;try{r=new SR()}catch(e){w("tạo lỗi: "+e.name);return}mtRec=r;
-  if(v!=="C")r.lang="en-US";r.interimResults=v==="A";r.continuous=v==="B";r.maxAlternatives=1;
-  ["start","audiostart","soundstart","speechstart","speechend","soundend","audioend","nomatch"].forEach(n=>r.addEventListener(n,()=>w(n)));
-  r.onresult=ev=>{let s="";for(let k=0;k<ev.results.length;k++)s+=(ev.results[k].isFinal?"[final] ":"[tạm] ")+ev.results[k][0].transcript+" ";w("result: "+s)};
-  r.onerror=ev=>w("ERROR: "+ev.error+(ev.message?" – "+ev.message:""));
-  r.onend=()=>{w("end");if(mtRec===r)mtRec=null};
-  try{r.start();w("đã gọi start()")}catch(e){w("start lỗi: "+e.name+" "+e.message)}
-  setTimeout(()=>{if(mtRec===r){w("tự dừng sau 8s");try{r.stop()}catch(e){}}},8000);
-}
 function route(){
   stopAll();if(curRec)curRec.stop();
   const h=decodeURIComponent(location.hash.slice(1));
-  if(h==="mictest"){renderMicTest();return}
   const t=T.find(x=>x.id===h);
   if(t){renderTopic(t);return}
   if(cur||!app.firstChild)renderHome();
