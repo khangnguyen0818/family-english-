@@ -146,6 +146,9 @@ select{font:inherit;font-size:.85rem;padding:4px 8px;border-radius:8px;border:1p
 .role small{display:block;font-weight:500;color:var(--muted)}
 .role.sel{border-color:var(--c);background:color-mix(in srgb,var(--c) 10%,var(--surface))}
 .chk{display:flex;gap:8px;align-items:flex-start;font-size:.9rem}
+.micperm{flex-basis:100%;background:var(--sun-soft);border:1px solid var(--sun);border-radius:14px;padding:12px 14px;display:grid;gap:8px;justify-items:start}
+.micperm p{margin:0;font-size:.92rem}
+.micperm .hint{color:var(--muted);font-size:.85rem}
 .modes{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .modes .role{--c:var(--accent);text-align:center}
 .names{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -3372,15 +3375,23 @@ function record(target,ui){
       r.onerror=ev=>{rec.code=ev.error||"";rec.err=MAP[ev.error]||"sr_other"};
       r.onend=()=>{clearTimeout(idle);if(rec.done)return;
         const fast=Date.now()-t0<1500&&!got&&!rec.userStop&&rec.err!=="not_granted";
-        /* ended at once: the phone's audio is often still busy right after the app spoke a line. Wait and retry. */
-        if(fast&&tries<3){setTimeout(()=>{if(!rec.done)go()},tries*500);return}
+        /* ended at once, or cut off ("aborted") before any word: the phone's audio was busy (just spoke a line,
+           a permission prompt, another app). Wait and retry instead of showing an error. */
+        const retry=!got&&!rec.userStop&&(fast||rec.err==="aborted");
+        if(retry&&tries<3){setTimeout(()=>{if(!rec.done)go()},tries*500);return}
         if(fast){rec.code=rec.code||"end";finish("sr_fast");return}
         finish(rec.err||"nospeech")};
       try{r.start()}catch(e){if(tries<3)setTimeout(()=>{if(!rec.done)go()},500);else finish("nosr")}
     };
-    /* never open the mic while the phone is still speaking: it hears nothing */
-    const wait=Math.max(0,700-(Date.now()-lastSpokeAt))+(synth&&synth.speaking?400:0);
-    ui.onState("listening");setTimeout(()=>{if(!rec.done)go()},wait);rec.timers.push(setTimeout(()=>rec.stop(),12000+wait));
+    const begin=()=>{if(rec.done)return;
+      /* never open the mic while the phone is still speaking: it hears nothing */
+      const wait=Math.max(0,700-(Date.now()-lastSpokeAt))+(synth&&synth.speaking?400:0);
+      ui.onState("listening");rec.timers.push(setTimeout(()=>rec.stop(),12000+wait));
+      if(wait)setTimeout(()=>{if(!rec.done)go()},wait);else go()};
+    /* Ask for the microphone once, with the browser's normal prompt, before recognition starts.
+       A prompt that appears while recognition is running cuts it off ("aborted"), on every tap. */
+    if(needMicAsk()){ui.onState("starting");askMic().then(ok=>{if(ok)begin();else finish("not_granted")});return}
+    begin();
     return;
   }
   ui.onError(errMsg("nosr"));
@@ -3388,7 +3399,7 @@ function record(target,ui){
 function errMsg(r,code){const m=({
  not_granted:"Chưa được phép dùng micro. Trong Chrome bấm biểu tượng ổ khóa hoặc ⓘ cạnh địa chỉ trang → Quyền → Micrô → Cho phép, rồi tải lại trang.",
  sr_service:"Trình duyệt này không cho dùng nhận dạng giọng nói để chấm điểm. Hãy mở link bằng Google Chrome.",
- aborted:"Micro bị ngắt giữa chừng. Bấm mic lần nữa để thử lại.",
+ aborted:"Micro bị ngắt giữa chừng. Bấm mic lần nữa để thử lại. Nếu lần nào điện thoại cũng hỏi quyền micro, xem hướng dẫn ‘Cho phép micro một lần’ ở trang chủ.",
  audio_capture:"Không mở được micro. Có thể ứng dụng khác (Zalo, ghi âm, cuộc gọi…) đang dùng micro. Tắt ứng dụng đó rồi thử lại.",
  sr_lang:"Trình duyệt chưa hỗ trợ nhận dạng tiếng Anh. Hãy mở link bằng Google Chrome.",
  sr_other:"Chấm điểm gặp lỗi. Hãy mở link bằng Google Chrome rồi thử lại.",
@@ -3404,6 +3415,13 @@ function errMsg(r,code){const m=({
 function browserName(){const u=navigator.userAgent;const os=/iPhone|iPad/.test(u)?"iPhone":/Android/.test(u)?"Android":"máy tính";
   const b=/zalo/i.test(u)?"Zalo":/FBAN|FBAV|FB_IAB/.test(u)?"Facebook":/CocCoc|coc_coc/i.test(u)?"Cốc Cốc":/SamsungBrowser/.test(u)?"Samsung Internet":/EdgA|Edg\//.test(u)?"Edge":/CriOS|Chrome\//.test(u)?"Chrome":/Safari/.test(u)?"Safari":"trình duyệt khác";return b+" "+os}
 let srBroken=null;
+/* ---- microphone permission: asked once per visit, remembered by the browser ---- */
+let micPerm="unknown", micAskedThisVisit=false;
+try{navigator.permissions&&navigator.permissions.query({name:"microphone"}).then(p=>{micPerm=p.state;updNote();p.onchange=()=>{micPerm=p.state;updNote()}}).catch(()=>{})}catch(e){}
+function needMicAsk(){return !window.claude&&CAN_REC&&micPerm!=="granted"&&!micAskedThisVisit}
+function askMic(){micAskedThisVisit=true;
+  return navigator.mediaDevices.getUserMedia({audio:true}).then(s=>{s.getTracks().forEach(t=>t.stop());if(micPerm!=="unknown")micPerm="granted";updNote();return true})
+    .catch(e=>{if(e&&e.name==="NotAllowedError"){micPerm="denied";updNote();return false}return true})}
 const INAPP=/zalo|FBAN|FBAV|FB_IAB|Instagram|Line\/|TikTok|musical_ly/i.test(navigator.userAgent);
 const ODDBROWSER=/coc_coc|CocCoc|SamsungBrowser|UCBrowser|MiuiBrowser|OPR\//i.test(navigator.userAgent);
 
@@ -3459,7 +3477,12 @@ function updNote(){const el=$("#micnote");if(!el)return;
   const micOk=!!(dict||SR||local);const spkOk=!!(tts||synth);
   const micTxt=local?(SR&&!srBroken?"chấm điểm và nghe lại":"chỉ ghi âm, nghe lại (chưa chấm điểm)"):micOk?"chấm điểm sẵn sàng":(capsDone?"không hỗ trợ ở đây":"đang kiểm tra…");
   const warn=!window.claude&&(INAPP||ODDBROWSER||srBroken||!SR)?`<span class="pill no" style="white-space:normal"><span class="dot"></span>${INAPP?"Bạn đang mở trong Zalo/Facebook. Bấm ⋮ hoặc ‘Mở bằng trình duyệt’ để mở bằng Chrome thì mới chấm điểm được.":"Để chấm điểm phát âm, hãy mở link này bằng Google Chrome."}</span>`:"";
-  el.innerHTML=`<span class="pill ${spkOk?"ok":"no"}"><span class="dot"></span>Loa: ${spkOk?(tts?"giọng Claude":"giọng trình duyệt"):"không hỗ trợ"}</span><span class="pill ${micOk&&!srBroken?"ok":"no"}"><span class="dot"></span>Thu âm: ${micTxt}</span>${warn}`}
+  const ios=/iPhone|iPad/.test(navigator.userAgent);
+  const perm=window.claude||!CAN_REC?"":micPerm==="granted"?`<span class="pill ok"><span class="dot"></span>Micro: đã cho phép, không hỏi lại</span>`
+    :`<div class="micperm"><b>Cho phép micro một lần</b><p>Bấm nút dưới đây. Khi điện thoại hỏi, chọn <b>‘Cho phép khi truy cập trang web’</b> hoặc <b>‘Cho phép’</b>, đừng chọn ‘Chỉ lần này’. Những lần bấm mic sau sẽ không hỏi lại.</p>
+      ${micPerm==="denied"?`<p class="err">Micro đang bị chặn. ${ios?"Vào Cài đặt → Safari → Micrô → Cho phép, rồi mở lại trang.":"Bấm biểu tượng bên trái thanh địa chỉ → Quyền → Micrô → Cho phép, rồi tải lại trang."}</p>`:`<button class="btn primary" data-act="micok">${IC.mic}Cho phép micro</button>`}
+      ${ios?`<p class="hint">iPhone: để Safari không hỏi lại mỗi lần, vào <b>Cài đặt → Safari → Micrô</b> và chọn <b>Cho phép</b>.</p>`:""}</div>`;
+  el.innerHTML=`<span class="pill ${spkOk?"ok":"no"}"><span class="dot"></span>Loa: ${spkOk?(tts?"giọng Claude":"giọng trình duyệt"):"không hỗ trợ"}</span><span class="pill ${micOk&&!srBroken?"ok":"no"}"><span class="dot"></span>Thu âm: ${micTxt}</span>${warn}${perm}`}
 
 /* ============ RENDER ============ */
 const app=$("#app");
@@ -3596,6 +3619,7 @@ function micUI(btn,text,resEl,key,onScore){
 document.addEventListener("click",e=>{
   const b=e.target.closest("[data-act]");if(!b)return;const a=b.dataset.act,t=cur;
   if(a==="stop"){stopAll();return}
+  if(a==="micok"){micAskedThisVisit=false;askMic().then(ok=>{if(ok&&micPerm!=="granted"){micPerm="granted";updNote()}});return}
   if(a==="selfrec"){if(curRec){curRec.stop();return}stopAll();const out=b.parentElement.querySelector(".selfout"),lbl=b.querySelector(".mlbl"),orig=lbl.textContent;
     recordLocal({onState:s=>{const on=s!=="idle";b.classList.toggle("on",on);lbl.textContent=s==="starting"?"Đang mở mic…":s==="listening"?"Đang ghi… nói xong sẽ tự dừng":orig},
       onLive:()=>{},onDone:(_,url)=>{out.innerHTML=`<audio controls src="${url}"></audio>`;const au=out.querySelector("audio");try{au.play()}catch(e){}},
