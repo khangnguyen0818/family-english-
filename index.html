@@ -3272,12 +3272,13 @@ let toastT;
 function toast(msg){const t=$("#toast");t.textContent=msg;t.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>t.hidden=true,4200)}
 
 /* ============ SPEECH OUT ============ */
+let lastSpokeAt=0;
 let tts=null, ttsBlocked=false, ttsBroken=false, lineCb=null, ttsState="idle", browserSpeaking=false, playToken=0;
 const synth=window.speechSynthesis||null; let enVoice=null;
 function pickVoice(){if(!synth)return;const vs=synth.getVoices();enVoice=vs.find(v=>/en[-_]US/i.test(v.lang)&&/Natural|Google|Aria|Jenny|Samantha/i.test(v.name))||vs.find(v=>/en[-_]US/i.test(v.lang))||vs.find(v=>/^en/i.test(v.lang))||null}
 if(synth){pickVoice();try{synth.addEventListener("voiceschanged",pickVoice)}catch(e){}}
 function updStop(){$("#stopfab").hidden=!(ttsState!=="idle"||browserSpeaking)}
-function sayBrowser(text,spk,rate){return new Promise((res,rej)=>{const u=new SpeechSynthesisUtterance(text);u.lang="en-US";if(enVoice)u.voice=enVoice;u.rate=rate;u.pitch=(SPK[spk]&&SPK[spk].pitch)||1;u.onend=()=>res();u.onerror=e=>rej({code:e.error||"upstream_error"});synth.speak(u)})}
+function sayBrowser(text,spk,rate){return new Promise((res,rej)=>{const u=new SpeechSynthesisUtterance(text);u.lang="en-US";if(enVoice)u.voice=enVoice;u.rate=rate;u.pitch=(SPK[spk]&&SPK[spk].pitch)||1;u.onend=()=>{lastSpokeAt=Date.now();res()};u.onerror=e=>rej({code:e.error||"upstream_error"});synth.speak(u)})}
 async function playLines(items,onLine,rate){
   rate=rate||RATE; const my=++playToken;
   if(synth)synth.cancel();
@@ -3371,13 +3372,15 @@ function record(target,ui){
       r.onerror=ev=>{rec.code=ev.error||"";rec.err=MAP[ev.error]||"sr_other"};
       r.onend=()=>{clearTimeout(idle);if(rec.done)return;
         const fast=Date.now()-t0<1500&&!got&&!rec.userStop&&rec.err!=="not_granted";
-        if(fast&&tries<2){setTimeout(()=>{if(!rec.done)go()},250);return}
-        if(fast&&CAN_REC&&!window.claude){rec.done=true;clear();if(curRec===rec)curRec=null;ui.onState("idle");
-          srBroken=rec.code||"end";updNote();setTimeout(()=>recordLocal(ui),50);return}
+        /* ended at once: the phone's audio is often still busy right after the app spoke a line. Wait and retry. */
+        if(fast&&tries<3){setTimeout(()=>{if(!rec.done)go()},tries*500);return}
+        if(fast){rec.code=rec.code||"end";finish("sr_fast");return}
         finish(rec.err||"nospeech")};
-      try{r.start()}catch(e){finish("nosr")}
+      try{r.start()}catch(e){if(tries<3)setTimeout(()=>{if(!rec.done)go()},500);else finish("nosr")}
     };
-    ui.onState("listening");go();rec.timers.push(setTimeout(()=>rec.stop(),12000));
+    /* never open the mic while the phone is still speaking: it hears nothing */
+    const wait=Math.max(0,700-(Date.now()-lastSpokeAt))+(synth&&synth.speaking?400:0);
+    ui.onState("listening");setTimeout(()=>{if(!rec.done)go()},wait);rec.timers.push(setTimeout(()=>rec.stop(),12000+wait));
     return;
   }
   ui.onError(errMsg("nosr"));
@@ -3389,6 +3392,7 @@ function errMsg(r,code){const m=({
  audio_capture:"Không mở được micro. Có thể ứng dụng khác (Zalo, ghi âm, cuộc gọi…) đang dùng micro. Tắt ứng dụng đó rồi thử lại.",
  sr_lang:"Trình duyệt chưa hỗ trợ nhận dạng tiếng Anh. Hãy mở link bằng Google Chrome.",
  sr_other:"Chấm điểm gặp lỗi. Hãy mở link bằng Google Chrome rồi thử lại.",
+ sr_fast:"Micro tắt ngay khi vừa mở nên chưa nghe được gì. Đợi một giây rồi bấm mic lại. Nếu lần nào cũng vậy, hãy mở link bằng Google Chrome (không mở từ Zalo/Facebook).",
  dismissed:"Bạn đã đóng hộp hỏi quyền. Bấm nút mic lần nữa để cho phép.",
  retry_lang:"Bấm nút mic lần nữa để thử lại.",
  unavailable:"Thu âm chưa khả dụng với tài khoản hoặc cửa sổ này.",
@@ -3396,7 +3400,9 @@ function errMsg(r,code){const m=({
  nospeech:"Chưa nghe thấy gì. Bấm mic, nói to và rõ rồi đợi một giây.",
  network:"Chấm điểm cần mạng Internet. Kiểm tra kết nối rồi thử lại.",
  nosr:"Nơi bạn đang mở không hỗ trợ thu âm. Hãy mở trang này trên claude.ai bằng Chrome hoặc Edge, hoặc cửa sổ chính của ứng dụng Claude."
-}[r]||"Chưa nghe thấy gì. Bấm mic, nói to và rõ rồi đợi một giây.");return code?m+` (mã lỗi: ${code})`:m}
+}[r]||"Chưa nghe thấy gì. Bấm mic, nói to và rõ rồi đợi một giây.");return code?m+` (mã lỗi: ${code} · ${browserName()})`:m}
+function browserName(){const u=navigator.userAgent;const os=/iPhone|iPad/.test(u)?"iPhone":/Android/.test(u)?"Android":"máy tính";
+  const b=/zalo/i.test(u)?"Zalo":/FBAN|FBAV|FB_IAB/.test(u)?"Facebook":/CocCoc|coc_coc/i.test(u)?"Cốc Cốc":/SamsungBrowser/.test(u)?"Samsung Internet":/EdgA|Edg\//.test(u)?"Edge":/CriOS|Chrome\//.test(u)?"Chrome":/Safari/.test(u)?"Safari":"trình duyệt khác";return b+" "+os}
 let srBroken=null;
 const INAPP=/zalo|FBAN|FBAV|FB_IAB|Instagram|Line\/|TikTok|musical_ly/i.test(navigator.userAgent);
 const ODDBROWSER=/coc_coc|CocCoc|SamsungBrowser|UCBrowser|MiuiBrowser|OPR\//i.test(navigator.userAgent);
