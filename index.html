@@ -3334,120 +3334,16 @@ function record(target,ui){
       const c=e&&e.code; if(c==="unavailable"&&dictLang){dictLang=null;finish("retry_lang");return} finish(c)});
     return;
   }
-  /* Which engine:
-     · Computer and Android with Chrome/Edge → the browser's built-in speech recognition (fast, stops by itself).
-     · iPhone/iPad, or any browser where that fails → recording + the in-browser English model (Whisper). */
-  if(SR&&!IS_IOS&&!srBad){recordSR(ui);return}
-  if(!CAN_MIC){ui.onError(errMsg("nosr"));return}
-  recordWhisper(ui);
-}
-const IS_IOS=/iPhone|iPad|iPod/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);
-let srBad=false;
-function recordSR(ui){
-  const rec={text:"",part:"",done:false,timers:[]};curRec=rec;
-  let r,code="",quiet=null,got=false,tries=0,stopping=false;
-  const finish=reason=>{if(rec.done)return;rec.done=true;clearTimeout(quiet);rec.timers.forEach(clearTimeout);if(curRec===rec)curRec=null;ui.onState("idle");
-    const heard=(rec.text+" "+rec.part).trim();if(heard)ui.onDone(heard);else ui.onError(errMsg(reason))};
-  const go=()=>{tries++;code="";const t0=Date.now();
-    try{r=new SR()}catch(e){toWhisper();return}
-    r.lang="en-US";r.interimResults=true;r.continuous=false;r.maxAlternatives=1;
-    r.onresult=ev=>{got=true;let f="",p="";for(let k=0;k<ev.results.length;k++){const x=ev.results[k];if(x.isFinal)f+=x[0].transcript+" ";else p+=x[0].transcript}
-      rec.text=f;rec.part=p;ui.onLive((f+p).trim());
-      clearTimeout(quiet);quiet=setTimeout(()=>{stopping=true;try{r.stop()}catch(e){}},f.trim()?500:1500)};
-    r.onerror=ev=>{code=ev.error||""};
-    r.onend=()=>{clearTimeout(quiet);if(rec.done)return;
-      if(got){finish("nospeech");return}
-      if(code==="not-allowed"){finish("not_granted");return}
-      if(code==="no-speech"||stopping){finish("nospeech");return}
-      /* cut off at once: try once more */
-      if(tries<2&&Date.now()-t0<1500){setTimeout(()=>{if(!rec.done)go()},300);return}
-      /* the browser's recognition does not work here (no service, no network, unsupported) → use the built-in model */
-      srBad=true;toWhisper()};
-    try{r.start()}catch(e){srBad=true;toWhisper()}};
-  const toWhisper=()=>{if(rec.done)return;rec.done=true;clearTimeout(quiet);rec.timers.forEach(clearTimeout);if(curRec===rec)curRec=null;
-    if(CAN_MIC)recordWhisper(ui);else{ui.onState("idle");ui.onError(errMsg("nosr"))}};
-  rec.stop=()=>{stopping=true;clearTimeout(quiet);try{r&&r.stop()}catch(e){}rec.timers.push(setTimeout(()=>finish("nospeech"),1500))};
-  ui.onState("listening");rec.timers.push(setTimeout(()=>rec.stop(),10000));
-  go();
-}
-
-/* ===== Phone / browser mic (rebuilt from scratch) =====
-   Tap mic → record from the microphone → stops by itself 1.2 s after you stop talking → a small English
-   speech model (Whisper tiny) turns the recording into text inside the browser → score.
-   It does not use Siri, Dictation or Google's speech service, so it works the same on iPhone and Android.
-   The model (about 40 MB) downloads once on the first tap and is then kept by the browser. */
-const CAN_MIC=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia);
-const ASR_LIB="https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2";
-let asrP=null, asrReady=false, asrProg=null, actx=null;
-function loadASR(){
-  if(asrP)return asrP;
-  const files={};
-  asrP=import(ASR_LIB).then(TF=>{TF.env.allowLocalModels=false;
-    return TF.pipeline("automatic-speech-recognition","Xenova/whisper-tiny.en",{dtype:"q8",device:"wasm",
-      progress_callback:p=>{if(p&&p.status==="progress"&&p.total){files[p.file]=[p.loaded,p.total];let a=0,b=0;for(const k in files){a+=files[k][0];b+=files[k][1]}asrProg&&asrProg(Math.round(100*a/b))}}})})
-    .then(asr=>{asrReady=true;updNote();return asr});
-  asrP.catch(()=>{asrP=null});
-  return asrP;
-}
-function toMono16k(chunks,rate){
-  let n=0;for(const c of chunks)n+=c.length;const all=new Float32Array(n);let o=0;for(const c of chunks){all.set(c,o);o+=c.length}
-  if(rate===16000)return all;
-  const ratio=rate/16000,len=Math.floor(all.length/ratio),out=new Float32Array(len);
-  for(let i=0;i<len;i++){const x=i*ratio,j=Math.floor(x),f=x-j;out[i]=all[j]*(1-f)+(all[j+1]||0)*f}
-  return out;
-}
-function wavURL(pcm,rate){
-  const b=new ArrayBuffer(44+pcm.length*2),v=new DataView(b),s=(o,t)=>{for(let i=0;i<t.length;i++)v.setUint8(o+i,t.charCodeAt(i))};
-  s(0,"RIFF");v.setUint32(4,36+pcm.length*2,true);s(8,"WAVE");s(12,"fmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
-  v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);s(36,"data");v.setUint32(40,pcm.length*2,true);
-  for(let i=0;i<pcm.length;i++){const x=Math.max(-1,Math.min(1,pcm[i]));v.setInt16(44+i*2,x<0?x*0x8000:x*0x7fff,true)}
-  return URL.createObjectURL(new Blob([b],{type:"audio/wav"}));
-}
-async function transcribe(pcm16k,info){
-  asrProg=p=>info(`Đang tải bộ chấm điểm (chỉ lần đầu)… ${p}%`);
-  try{if(!asrReady)info("Đang tải bộ chấm điểm (chỉ lần đầu, khoảng 40 MB)…");
-    const asr=await loadASR();info("Đang chấm điểm…");
-    /* half a second of silence after the last word helps the model finish the sentence */
-    const padded=new Float32Array(pcm16k.length+8000);padded.set(pcm16k);
-    const out=await asr(padded);return ((out&&out.text)||"").replace(/\[[^\]]*\]|\([^)]*\)/g," ").trim()}
-  finally{asrProg=null}
-}
-function recordWhisper(ui){
-  const info=ui.onInfo||ui.onLive;
-  const rec={ended:false};curRec=rec;
-  /* the audio engine must be started inside the tap itself (iPhone rule) */
-  const AC=window.AudioContext||window.webkitAudioContext;
-  try{if(!actx)actx=new AC();if(actx.state!=="running")actx.resume()}catch(e){}
-  ui.onState("starting");loadASR();
-  /* Voice detection that adapts to the room: the first ~0.3 s measures the background noise,
-     speech = clearly louder than that for 2 blocks in a row, stop after 0.9 s of quiet. */
-  const chunks=[],levels=[];let spoke=false,loud=0,quietMs=0,totalMs=0,startIdx=0,noise=null,thr=0.02,stream=null,src=null,proc=null;
-  const cleanup=()=>{try{proc&&(proc.onaudioprocess=null,proc.disconnect());src&&src.disconnect()}catch(e){}if(stream)stream.getTracks().forEach(t=>t.stop())};
-  const end=async reason=>{if(rec.ended)return;rec.ended=true;cleanup();
-    if(!spoke){if(curRec===rec)curRec=null;ui.onState("idle");ui.onError(errMsg(reason||"nospeech"));return}
-    ui.onState("finishing");
-    /* keep from 0.3 s before the voice started: less silence = faster and more accurate */
-    const per=chunks[0]?chunks[0].length/actx.sampleRate:0.05,from=Math.max(0,startIdx-Math.ceil(0.5/per));
-    const pcm=toMono16k(chunks.slice(from),actx.sampleRate),url=wavURL(pcm,16000);
-    try{const text=await transcribe(pcm,info);if(curRec===rec)curRec=null;ui.onState("idle");
-      if(text)ui.onDone(text,url);else ui.onError(errMsg("nospeech"))}
-    catch(e){if(curRec===rec)curRec=null;ui.onState("idle");ui.onError(errMsg("asr_load"))}};
-  rec.stop=()=>end(spoke?"":"nospeech");
-  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}}).then(s=>{
-    if(rec.ended){s.getTracks().forEach(t=>t.stop());return}
-    stream=s;try{if(actx.state!=="running")actx.resume()}catch(e){}
-    src=actx.createMediaStreamSource(s);proc=actx.createScriptProcessor(2048,1,1);
-    proc.onaudioprocess=e=>{if(rec.ended)return;const d=e.inputBuffer.getChannelData(0);chunks.push(new Float32Array(d));
-      let sum=0;for(let i=0;i<d.length;i++)sum+=d[i]*d[i];const rms=Math.sqrt(sum/d.length),ms=1000*d.length/actx.sampleRate;totalMs+=ms;
-      if(noise===null){levels.push(rms);if(totalMs>=300){const s2=levels.slice().sort((a,b)=>a-b);noise=s2[Math.floor(s2.length/4)];thr=Math.min(0.08,Math.max(0.006,noise*3+0.003))}return}
-      if(rms>thr){loud++;if(!spoke&&loud>=2){spoke=true;startIdx=chunks.length-2}quietMs=0}
-      else{loud=0;if(spoke)quietMs+=ms;
-        /* slowly follow the background while nobody speaks */
-        if(!spoke){noise=noise*0.95+rms*0.05;thr=Math.min(0.08,Math.max(0.006,noise*3+0.003))}}
-      if(spoke&&quietMs>1100)end();else if(!spoke&&totalMs>6000)end("nospeech");else if(totalMs>10000)end()};
-    src.connect(proc);proc.connect(actx.destination);
-    ui.onState("listening");info("Đang nghe… nói xong sẽ tự dừng");
-  }).catch(e=>{rec.ended=true;if(curRec===rec)curRec=null;ui.onState("idle");ui.onError(errMsg(e&&e.name==="NotAllowedError"?"not_granted":"audio_capture"))});
+  /* Original mode: the browser's own speech recognition. Tap the mic, speak, it stops when you stop talking. */
+  if(!SR){ui.onError(errMsg("nosr"));return}
+  let r;try{r=new SR()}catch(e){ui.onError(errMsg("nosr"));return}
+  r.lang="en-US";r.interimResults=true;r.maxAlternatives=1;
+  r.onresult=ev=>{let f="",p="";for(let k=0;k<ev.results.length;k++){const x=ev.results[k];if(x.isFinal)f+=x[0].transcript+" ";else p+=x[0].transcript}rec.text=f;rec.part=p;ui.onLive((f+p).trim())};
+  r.onerror=ev=>{rec.code=ev.error||"";rec.err=ev.error==="not-allowed"||ev.error==="service-not-allowed"?"not_granted":ev.error==="no-speech"?"nospeech":ev.error==="network"?"network":"upstream_error"};
+  r.onend=()=>finish(rec.err||"nospeech",rec.err==="upstream_error"?rec.code:"");
+  rec.stop=()=>{try{r.stop()}catch(e){}};
+  curRec=rec;
+  try{r.start();ui.onState("listening");rec.timers.push(setTimeout(()=>rec.stop(),16000))}catch(e){finish("nosr")}
 }
 function errMsg(r,code){const m=({
  not_granted:/iPhone|iPad/.test(navigator.userAgent)?"Chưa được phép dùng micro. Vào Cài đặt → Safari → Micrô → chọn Cho phép, rồi tải lại trang.":"Chưa được phép dùng micro. Bấm biểu tượng bên trái thanh địa chỉ → Quyền → Micrô → Cho phép, rồi tải lại trang.",
@@ -3459,6 +3355,7 @@ function errMsg(r,code){const m=({
  rate_limited:"Đang có quá nhiều lượt thu âm, đợi một lát rồi thử lại.",
  nospeech:"Chưa nghe thấy gì. Bấm mic, nói to và rõ rồi đợi một giây.",
  network:"Chấm điểm cần mạng Internet. Kiểm tra kết nối rồi thử lại.",
+ upstream_error:/iPhone|iPad/.test(navigator.userAgent)?"iPhone chưa nghe được. Kiểm tra: Cài đặt → Safari → Micrô → Cho phép; Cài đặt → Siri → bật Siri; Cài đặt → Cài đặt chung → Bàn phím → bật Đọc chính tả. Xong tắt hẳn Safari rồi mở lại.":"Chưa nghe được. Bấm mic lần nữa rồi nói.",
  nosr:"Nơi bạn đang mở không hỗ trợ thu âm. Hãy mở trang này trên claude.ai bằng Chrome hoặc Edge, hoặc cửa sổ chính của ứng dụng Claude."
 }[r]||"Chưa nghe thấy gì. Bấm mic, nói to và rõ rồi đợi một giây.");return code?m+` (mã lỗi: ${code} · ${browserName()})`:m}
 function browserName(){const u=navigator.userAgent;const os=/iPhone|iPad/.test(u)?"iPhone":/Android/.test(u)?"Android":"máy tính";
@@ -3513,10 +3410,10 @@ function initCaps(n){
   } else if(n<25) setTimeout(()=>initCaps(n+1),200); else {capsDone=true;updNote()}
 }
 function updNote(){const el=$("#micnote");if(!el)return;
-  const micOk=!!(dict||CAN_MIC);const spkOk=!!(tts||synth);
+  const micOk=!!(dict||SR);const spkOk=!!(tts||synth);
   const micTxt=micOk?"bấm mic, nói xong tự dừng và chấm điểm":(capsDone?"không hỗ trợ ở đây":"đang kiểm tra…");
   const warn=!window.claude&&INAPP?`<span class="pill no" style="white-space:normal"><span class="dot"></span>Bạn đang mở trong Zalo/Facebook. Bấm ⋮ hoặc ‘Mở bằng trình duyệt’ để mở bằng Safari/Chrome thì micro mới chạy.</span>`:"";
-  const model=!dict&&CAN_MIC&&(IS_IOS||!SR||srBad)?`<span class="pill ${asrReady?"ok":""}"><span class="dot"></span>Bộ chấm điểm: ${asrReady?"đã sẵn sàng":"tải ở lần bấm mic đầu tiên (~40 MB)"}</span>`:"";
+  const model="";
   el.innerHTML=`<span class="pill ${spkOk?"ok":"no"}"><span class="dot"></span>Loa: ${spkOk?(tts?"giọng Claude":"giọng trình duyệt"):"không hỗ trợ"}</span><span class="pill ${micOk?"ok":"no"}"><span class="dot"></span>Thu âm: ${micTxt}</span>${model}${warn}`}
 
 /* ============ RENDER ============ */

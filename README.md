@@ -10,7 +10,7 @@
 
 ## Cách dùng
 
-Mở link GitHub Pages bằng **Chrome** (Android) hoặc **Safari** (iPhone). Trên máy tính và Android (Chrome/Edge), app dùng bộ nhận dạng giọng nói có sẵn của trình duyệt. Trên iPhone/iPad, app dùng bộ chấm điểm chạy ngay trong trình duyệt (không cần Siri): lần bấm mic đầu tiên tải khoảng 40 MB, các lần sau dùng luôn.
+Mở link GitHub Pages bằng **Chrome** (Android) hoặc **Safari** (iPhone). App dùng bộ nhận dạng giọng nói có sẵn của trình duyệt. Trên iPhone cần: Cài đặt → Safari → Micrô → Cho phép; bật Siri và Đọc chính tả.
 
 Lần đầu bấm mic, trình duyệt sẽ hỏi quyền dùng micro: chọn **Cho phép khi truy cập trang web** (không chọn "Chỉ lần này"). Những lần sau không hỏi lại.
 
