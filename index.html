@@ -1,4 +1,5 @@
-<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0C7A79"><style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style></head><body><title>Cả Nhà Nói Tiếng Anh</title>
+<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0C7A79"><style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style></head><body>
+<title>Cả Nhà Nói Tiếng Anh</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700;800&family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap">
@@ -3338,7 +3339,10 @@ function record(target,ui){
   if(!SR){ui.onError(errMsg("nosr"));return}
   let r;try{r=new SR()}catch(e){ui.onError(errMsg("nosr"));return}
   r.lang="en-US";r.interimResults=true;r.maxAlternatives=1;
-  r.onresult=ev=>{let f="",p="";for(let k=0;k<ev.results.length;k++){const x=ev.results[k];if(x.isFinal)f+=x[0].transcript+" ";else p+=x[0].transcript}rec.text=f;rec.part=p;ui.onLive((f+p).trim())};
+  /* Score as soon as you stop talking: don't wait for the browser's own (slow) end-of-speech. */
+  const quick=ms=>{clear();rec.timers.push(setTimeout(()=>{if((rec.text+rec.part).trim()){finish("");try{r.abort()}catch(e){}}},ms));rec.timers.push(setTimeout(()=>rec.stop(),16000))};
+  r.onresult=ev=>{let f="",p="";for(let k=0;k<ev.results.length;k++){const x=ev.results[k];if(x.isFinal)f+=x[0].transcript+" ";else p+=x[0].transcript}rec.text=f;rec.part=p;const all=(f+p).trim();ui.onLive(all);
+    quick(score(target,all).score>=100?300:2000)};
   r.onerror=ev=>{rec.code=ev.error||"";rec.err=ev.error==="not-allowed"||ev.error==="service-not-allowed"?"not_granted":ev.error==="no-speech"?"nospeech":ev.error==="network"?"network":"upstream_error"};
   r.onend=()=>finish(rec.err||"nospeech",rec.err==="upstream_error"?rec.code:"");
   rec.stop=()=>{try{r.stop()}catch(e){}};
@@ -3447,8 +3451,12 @@ function lineHTML(t,ln,i){
   <div class="gram" id="g${i}" ${GRAMOPEN?"":"hidden"}><div class="pat"><span class="lbl">Cấu trúc</span><code>${esc(ln[3])}</code></div><ul>${ln[4].map(n=>`<li>${fmt(n)}</li>`).join("")}</ul></div>
   </div></article>`;
 }
-function renderTopic(t){
-  if(cur!==t){rp=null;rpTok++;tab="talk"}
+/* Remember the open tab (in the address) and role-play progress, so a page reload on the phone comes back to the same place. */
+function setHash(){if(!cur)return;const h="#"+cur.id+(tab==="talk"?"":"/"+tab);if(location.hash!==h)try{history.replaceState(null,"",h)}catch(e){}}
+function saveRP(){if(rp&&cur)store.set("cn_rp",{id:cur.id,at:Date.now(),rp:{role:rp.role,hide:rp.hide,i:rp.i,mode:rp.mode,names:rp.names,assign:rp.assign,scores:rp.scores||[]}})}
+function clearRP(){store.set("cn_rp",null)}
+function renderTopic(t,want){
+  if(cur!==t){rp=null;rpTok++;tab=["talk","rp","vocab"].includes(want)?want:"talk"}
   cur=t;const idx=T.indexOf(t),prev=T[idx-1],next=T[idx+1];
   app.innerHTML=`<div class="topbar"><div class="wrap topbar-in"><a href="#" class="back">← Chủ đề</a>
   <div class="tabs" role="tablist"><button role="tab" data-act="tab" data-tab="talk" aria-selected="${tab==="talk"}">Hội thoại</button><button role="tab" data-act="tab" data-tab="rp" aria-selected="${tab==="rp"}">Nhập vai</button><button role="tab" data-act="tab" data-tab="vocab" aria-selected="${tab==="vocab"}">Từ vựng</button></div>
@@ -3462,7 +3470,7 @@ function renderTopic(t){
 }
 function renderTab(){
   const t=cur,tb=$("#tb");
-  document.querySelectorAll(".tabs button").forEach(b=>b.setAttribute("aria-selected",b.dataset.tab===tab));
+  document.querySelectorAll(".tabs button").forEach(b=>b.setAttribute("aria-selected",b.dataset.tab===tab));setHash();
   if(tab==="talk"){
     tb.innerHTML=`<div class="bar"><button class="btn primary" data-act="playall">${IC.play}Nghe cả đoạn hội thoại</button><button class="btn" data-act="gramall">${GRAMOPEN?"Thu gọn phân tích ngữ pháp":"Mở tất cả phân tích ngữ pháp"}</button></div><div class="lines">${t.L.map((ln,i)=>lineHTML(t,ln,i)).join("")}</div>`;
   } else if(tab==="vocab"){
@@ -3477,6 +3485,8 @@ function playerOf(ln){if(!rp)return null;if(rp.mode==="duo"){const p=rp.assign[l
 function pname(p){return esc(rp.names[+p-1]||("Người "+p))}
 function renderRP(){
   const t=cur,tb=$("#tb");
+  let restore=false;
+  if(!rp){const s=store.get("cn_rp",null);if(s&&s.id===t.id&&Date.now()-s.at<3600e3&&s.rp&&s.rp.i>=0&&s.rp.i<t.L.length){rp=s.rp;restore=true}}
   if(!rp)rp={role:t.sp.includes("K")?"K":t.sp[t.sp.length-1],hide:store.get("cn_hide",false),i:-1,mode:store.get("cn_rpmode","solo"),names:store.get("cn_names",["Bố mẹ","Con"]),assign:defAssign(t)};
   const cnt=s=>t.L.filter(l=>l[0]===s).length;
   const modes=`<div class="modes"><button class="role ${rp.mode==="solo"?"sel":""}" data-act="rpmode" data-m="solo">1 người với máy<small>Máy đọc các vai còn lại</small></button><button class="role ${rp.mode==="duo"?"sel":""}" data-act="rpmode" data-m="duo">2 người cùng chơi<small>Hai người thay phiên nói</small></button></div>`;
@@ -3490,6 +3500,15 @@ function renderRP(){
   <label class="chk" for="rphide"><input type="checkbox" id="rphide" ${rp.hide?"checked":""}> Thử thách: ẩn câu tiếng Anh của ${rp.mode==="duo"?"người chơi":"tôi"}, chỉ hiện nghĩa tiếng Việt để tự nhớ</label>
   <div class="err" id="rperr" hidden></div>
   <div><button class="btn primary" data-act="rpstart">${IC.play}Bắt đầu nhập vai</button></div></div><div class="chat" id="chat"></div>`;
+  if(!restore)return;
+  /* rebuild the conversation up to where you were */
+  const chat=$("#chat");let h="";for(let k=0;k<=rp.i;k++)h+=bubble(t.L[k],k,playerOf(t.L[k]));chat.innerHTML=h;
+  for(let k=0;k<=rp.i;k++){const bb=$("#rp"+k),sc=rp.scores[k];
+    if(k<rp.i){bb.classList.add("done");bb.querySelector(".acts").innerHTML=""}
+    if(sc!=null){const re=$("#rpr"+k);re.hidden=false;re.innerHTML=`<div class="live">Điểm: <b>${sc}/100</b></div>`}}
+  const curB=$("#rp"+rp.i);
+  if(!playerOf(t.L[rp.i])||rp.scores[rp.i]!=null)curB.querySelector(".acts").insertAdjacentHTML("beforeend",`<button class="btn primary" data-act="rpnext">Tiếp tục →</button>`);
+  setTimeout(()=>scrollToEl(curB),50);
 }
 function readDuo(){
   if(rp.mode!=="duo")return true;
@@ -3512,7 +3531,7 @@ function scrollToEl(el){if(!el)return;const rm=matchMedia("(prefers-reduced-moti
 async function rpNext(){
   const t=cur,tok=rpTok,chat=$("#chat");if(!chat||!rp)return;
   const prevB=$("#rp"+rp.i);if(prevB)prevB.classList.add("done");
-  rp.i++;
+  rp.i++;saveRP();
   if(rp.i>=t.L.length){
     const avgOf=arr=>{const sc=arr.filter(x=>x!=null);return sc.length?{avg:Math.round(sc.reduce((a,b)=>a+b,0)/sc.length),n:sc.length}:null};
     let body;
@@ -3560,19 +3579,19 @@ document.addEventListener("click",e=>{
   if(a==="gramall"){GRAMOPEN=!GRAMOPEN;store.set("cn_gram",GRAMOPEN);renderTab();return}
   if(a==="playall"){const items=t.L.map((ln,i)=>({text:ln[1],spk:ln[0],id:"l"+i}));
     playLines(items,id=>{document.querySelectorAll(".line.playing").forEach(x=>x.classList.remove("playing"));if(id){const c=$("#"+id);if(c){c.classList.add("playing");scrollToEl(c)}}});return}
-  if(a==="tab"){if(tab===b.dataset.tab)return;stopAll();if(curRec)curRec.stop();rpTok++;rp=null;tab=b.dataset.tab;renderTab();return}
+  if(a==="tab"){if(tab===b.dataset.tab)return;stopAll();if(curRec)curRec.stop();rpTok++;rp=null;clearRP();tab=b.dataset.tab;renderTab();return}
   if(a==="vsay"){const v=t.vocab[+b.dataset.j];playLines([{text:v[0].replace(/\.\.\./g,""),spk:"M",id:"v"}]);return}
   if(a==="vrec"){const j=+b.dataset.j,v=t.vocab[j][0].replace(/\.\.\./g,"");record(v,micUI(b,v,$("#vr"+j),null));return}
-  if(a==="rprole"){rp.role=b.dataset.s;rp.i=-1;rpTok++;stopAll();renderRP();return}
-  if(a==="rpmode"){if($("#nm1"))readDuo();rp.mode=b.dataset.m;store.set("cn_rpmode",rp.mode);rp.i=-1;rpTok++;stopAll();renderRP();return}
+  if(a==="rprole"){clearRP();rp.role=b.dataset.s;rp.i=-1;rpTok++;stopAll();renderRP();return}
+  if(a==="rpmode"){clearRP();if($("#nm1"))readDuo();rp.mode=b.dataset.m;store.set("cn_rpmode",rp.mode);rp.i=-1;rpTok++;stopAll();renderRP();return}
   if(a==="rpstart"){const h=$("#rphide");if(h){if(!readDuo())return;rp.hide=h.checked;store.set("cn_hide",rp.hide)}rpStart();return}
-  if(a==="rpswap"){if(rp.mode==="duo"){for(const s in rp.assign)rp.assign[s]=rp.assign[s]==="1"?"2":rp.assign[s]==="2"?"1":"m"}else{const sp=t.sp;rp.role=sp[(sp.indexOf(rp.role)+1)%sp.length]}rp.i=-1;rpTok++;renderRP();scrollToEl($("#rpsetup"));return}
+  if(a==="rpswap"){clearRP();if(rp.mode==="duo"){for(const s in rp.assign)rp.assign[s]=rp.assign[s]==="1"?"2":rp.assign[s]==="2"?"1":"m"}else{const sp=t.sp;rp.role=sp[(sp.indexOf(rp.role)+1)%sp.length]}rp.i=-1;rpTok++;renderRP();scrollToEl($("#rpsetup"));return}
   if(a==="rpnext"){stopAll();if(curRec)curRec.stop();rpNext();return}
   if(a==="rpagain"){const ln=t.L[rp.i];playLines([{text:ln[1],spk:ln[0],id:"x"}]);return}
   if(a==="rpmodel"){const ln=t.L[rp.i];playLines([{text:ln[1],spk:ln[0],id:"x"}],null,RATE);return}
   if(a==="rphint"){const el=$("#rpen"+rp.i);if(el){el.classList.remove("mask");el.textContent=t.L[rp.i][1]}b.remove();return}
   if(a==="rprec"){const i=rp.i,ln=t.L[i],tok=rpTok;
-    record(ln[1],micUI(b,ln[1],$("#rpr"+i),t.id+":"+i,sc=>{if(sc!=null)rp.scores[i]=Math.max(rp.scores[i]||0,sc);
+    record(ln[1],micUI(b,ln[1],$("#rpr"+i),t.id+":"+i,sc=>{if(!rp)return;if(sc!=null){rp.scores[i]=Math.max(rp.scores[i]||0,sc);saveRP()}
       const acts=$("#rp"+i+" .acts");
       if(sc!=null&&sc>=75){setTimeout(()=>{if(tok===rpTok&&rp&&rp.i===i)rpNext()},1600)}
       else if(acts&&!acts.querySelector('[data-act="rpnext"].primary')){acts.insertAdjacentHTML("beforeend",`<button class="btn primary" data-act="rpnext">Tiếp tục →</button>`)}
@@ -3585,8 +3604,9 @@ document.addEventListener("change",e=>{
 function route(){
   stopAll();if(curRec)curRec.stop();
   const h=decodeURIComponent(location.hash.slice(1));
-  const t=T.find(x=>x.id===h);
-  if(t){renderTopic(t);return}
+  const [hid,htab]=h.split("/");
+  const t=T.find(x=>x.id===hid);
+  if(t){if(cur===t&&htab&&htab!==tab){tab=htab;renderTab();return}renderTopic(t,htab);return}
   if(cur||!app.firstChild)renderHome();
   if(h.startsWith("g-")){const el=document.getElementById(h);if(el)el.scrollIntoView()}else if(!h)window.scrollTo(0,0);
 }
