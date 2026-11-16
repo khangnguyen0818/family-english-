@@ -3340,12 +3340,13 @@ function record(target,ui){
   let r;try{r=new SR()}catch(e){ui.onError(errMsg("nosr"));return}
   r.lang="en-US";r.interimResults=true;r.maxAlternatives=1;
   /* Score as soon as you stop talking: don't wait for the browser's own (slow) end-of-speech. */
-  const quick=ms=>{clear();rec.timers.push(setTimeout(()=>{if((rec.text+rec.part).trim()){finish("");try{r.abort()}catch(e){}}},ms));rec.timers.push(setTimeout(()=>rec.stop(),16000))};
+  const quick=ms=>{clear();rec.timers.push(setTimeout(()=>{if((rec.text+rec.part).trim())rec.stop()},ms));rec.timers.push(setTimeout(()=>rec.stop(),16000))};
   r.onresult=ev=>{let f="",p="";for(let k=0;k<ev.results.length;k++){const x=ev.results[k];if(x.isFinal)f+=x[0].transcript+" ";else p+=x[0].transcript}rec.text=f;rec.part=p;const all=(f+p).trim();ui.onLive(all);
     quick(score(target,all).score>=100?300:2000)};
   r.onerror=ev=>{rec.code=ev.error||"";rec.err=ev.error==="not-allowed"||ev.error==="service-not-allowed"?"not_granted":ev.error==="no-speech"?"nospeech":ev.error==="network"?"network":"upstream_error"};
   r.onend=()=>finish(rec.err||"nospeech",rec.err==="upstream_error"?rec.code:"");
-  rec.stop=()=>{try{r.stop()}catch(e){}};
+  /* stop gently; if the phone never reports the end, score anyway after 1.2 s so the mic never hangs */
+  rec.stop=()=>{if(rec.stopping)return;rec.stopping=true;try{r.stop()}catch(e){}setTimeout(()=>finish(rec.err||"nospeech",rec.err==="upstream_error"?rec.code:""),1200)};
   curRec=rec;
   try{r.start();ui.onState("listening");rec.timers.push(setTimeout(()=>rec.stop(),16000))}catch(e){finish("nosr")}
 }
